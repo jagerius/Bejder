@@ -1,8 +1,27 @@
 tsx
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '@/app/store';
 import { setActiveProject } from '@/app/store/projectSlice';
 import { ProjectionEngine } from '@/domain/projection/ProjectionEngine';
+import PatternEditor2D from '@/features/editor/PatternEditor2D';
+import Viewer3D from '@/features/viewer3d/Viewer3D';
+import MaterialsPanel from '@/features/materials/MaterialsPanel';
+import ExportPanel from '@/features/export/ExportPanel';
+
+// Fix #4: przywrócona pełna nawigacja zakładkowa
+type TabId = 'pattern' | 'viewer3d' | 'materials' | 'export';
+
+interface Tab {
+  id: TabId;
+  label: string;
+}
+
+const TABS: Tab[] = [
+  { id: 'pattern', label: 'Wzór 2D' },
+  { id: 'viewer3d', label: 'Podgląd 3D' },
+  { id: 'materials', label: 'Materiały' },
+  { id: 'export', label: 'Eksport' },
+];
 
 interface EditorLayoutProps {
   projectId: string;
@@ -13,6 +32,7 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
   const project = useAppSelector((state) =>
     state.projects.projects.find((entry) => entry.projectId === projectId)
   );
+  const [activeTab, setActiveTab] = useState<TabId>('pattern');
 
   useEffect(() => {
     if (!project) {
@@ -28,13 +48,16 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
     dispatch(setActiveProject(null));
   };
 
+  // Fix #5: podłączamy <a> do document.body przed .click() — działa poprawnie w Firefox
   const handleExportTexture = () => {
     const engine = new ProjectionEngine(project);
     const result = engine.project2D();
     const link = document.createElement('a');
     link.href = result.textureCanvas.toDataURL('image/png');
     link.download = `${project.name}-texture.png`;
+    document.body.appendChild(link);
     link.click();
+    document.body.removeChild(link);
   };
 
   return (
@@ -70,12 +93,28 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
         </dl>
       </section>
 
-      <section aria-label="Edytor wzoru">
-        <p>
-          Widok edycji segmentów i podgląd 3D są podłączone do projektu{' '}
-          {project.projectId}.
-        </p>
-      </section>
+      {/* Fix #4: zakładkowa nawigacja — PatternEditor2D, Viewer3D, MaterialsPanel, ExportPanel */}
+      <nav className="editor-layout__tabs" aria-label="Sekcje edytora">
+        {TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            className={`editor-layout__tab${activeTab === tab.id ? ' editor-layout__tab--active' : ''}`}
+            onClick={() => setActiveTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </nav>
+
+      <div className="editor-layout__panel" role="tabpanel">
+        {activeTab === 'pattern' && <PatternEditor2D project={project} />}
+        {activeTab === 'viewer3d' && <Viewer3D project={project} />}
+        {activeTab === 'materials' && <MaterialsPanel project={project} />}
+        {activeTab === 'export' && <ExportPanel project={project} />}
+      </div>
     </main>
   );
 }

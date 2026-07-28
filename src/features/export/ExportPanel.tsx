@@ -1,7 +1,6 @@
 tsx
 import { useCallback, useMemo, useState } from 'react';
 import { jsPDF } from 'jspdf';
-import { useAppSelector } from '@/app/store';
 import { ProjectionEngine } from '@/domain/projection/ProjectionEngine';
 import type { Project } from '@/shared/types';
 
@@ -21,6 +20,11 @@ interface BomEntry {
   hex: string;
   rgb: RgbColor;
   count: number;
+}
+
+interface RowInstruction {
+  row: number;
+  cells: { cellId: string; colorHex: string; colorName: string }[];
 }
 
 const HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
@@ -54,8 +58,6 @@ function hexToRgb(hex: string): RgbColor | null {
   return { r, g, b };
 }
 
-// Zapewnia miejsce na kolejną linię; w razie potrzeby dodaje nową stronę PDF.
-// Chroni przed przepełnieniem strony we wszystkich sekcjach listowych (BOM, rzędy itp.).
 function ensureLineSpace(pdf: jsPDF, cursorY: number, title?: string): number {
   if (cursorY + LINE_HEIGHT_MM <= PAGE_HEIGHT_MM - MARGIN_MM) {
     return cursorY;
@@ -69,10 +71,37 @@ function ensureLineSpace(pdf: jsPDF, cursorY: number, title?: string): number {
   return MARGIN_MM;
 }
 
+// Fix #1: asynchroniczna konwersja canvas do data URL przez toBlob —
+// nie blokuje głównego wątku przy dużych rozdzielczościach
+function canvasToDataURL(canvas: HTMLCanvasElement): Promise<string> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('toBlob zwrócił null'));
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === 'string') {
+          resolve(reader.result);
+        } else {
+          reject(new Error('FileReader zwrócił nie-string wynik'));
+        }
+      };
+      reader.onerror = () => reject(reader.error ?? new Error('FileReader błąd'));
+      reader.readAsDataURL(blob);
+    }, 'image/png');
+  });
+}
+
 export default function ExportPanel({ project }: ExportPanelProps) {
   const [exportError, setExportError] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
-  const activeProjectId = useAppSelector((state) => state.projects.activeProjectId);
+
+  const colorMap = useMemo(
+    () => new Map(project.palette.colors.map((color) => [color.id, color])),
+    [project.palette.colors]
+  );
 
   const paletteWithRgb = useMemo(
     () =>
@@ -88,7 +117,6 @@ export default function ExportPanel({ project }: ExportPanelProps) {
     [paletteWithRgb]
   );
 
-  // Lista materiałów (BOM) — liczba koralików per kolor.
   const bomEntries = useMemo<BomEntry[]>(() => {
     const counts = new Map<string, number>();
     for (const colorId of Object.values(project.patternMap)) {
@@ -105,11 +133,35 @@ export default function ExportPanel({ project }: ExportPanelProps) {
       }));
   }, [paletteWithRgb, project.patternMap]);
 
-  const handleExportPdf = useCallback(() => {
-    if (activeProjectId !== project.projectId) {
-      setExportError('Projekt nie jest aktywny.');
-      return;
+  // Fix #2: rzeczywiste kolory z patternMap pogrupowane po rzędach —
+  // zamiast placeholdera eksportujemy konkretne instrukcje koralików
+  const rowInstructions = useMemo<RowInstruction[]>(() => {
+    const rowMap = new Map<number, RowInstruction['cells']>();
+
+    for (const segment of project.segments) {
+      for (const cell of segment.cells) {
+        const colorId = project.patternMap[cell.id];
+        if (!colorId) continue;
+        const color = colorMap.get(colorId);
+        if (!color) continue;
+
+        if (!rowMap.has(cell.row)) {
+          rowMap.set(cell.row, []);
+        }
+        rowMap.get(cell.row)!.push({
+          cellId: cell.id,
+          colorHex: color.hex,
+          colorName: color.name,
+        });
+      }
     }
+
+    return Array.from(rowMap.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([row, cells]) => ({ row, cells }));
+  }, [project.segments, project.patternMap, colorMap]);
+
+  const handleExportPdf = useCallback(async () => {
     if (invalidColors.length > 0) {
       setExportError(
         `Nieprawidłowy format koloru HEX: ${invalidColors
@@ -126,6 +178,9 @@ export default function ExportPanel({ project }: ExportPanelProps) {
       const engine = new ProjectionEngine(project);
       const result = engine.project2D();
 
+      // Fix #1: toBlob zamiast synchronicznego toDataURL
+      const image = await canvasToDataURL(result.textureCanvas);
+
       const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
       pdf.setFontSize(16);
       pdf.text(project.name, MARGIN_MM, 16);
@@ -136,10 +191,8 @@ export default function ExportPanel({ project }: ExportPanelProps) {
         24
       );
 
-      const image = result.textureCanvas.toDataURL('image/png');
       pdf.addImage(image, 'PNG', MARGIN_MM, 32, PAGE_WIDTH_MM - 2 * MARGIN_MM, 134.5);
 
-      // Sekcja BOM z ochroną przed przepełnieniem strony.
       let cursorY = ensureLineSpace(pdf, 176, 'Lista materiałów (BOM)');
       pdf.setFontSize(12);
       pdf.text('Lista materiałów (BOM)', MARGIN_MM, cursorY);
@@ -151,25 +204,43 @@ export default function ExportPanel({ project }: ExportPanelProps) {
         pdf.setFillColor(entry.rgb.r, entry.rgb.g, entry.rgb.b);
         pdf.rect(MARGIN_MM, cursorY - 4, 6, 6, 'F');
         pdf.setTextColor(30, 30, 30);
-        pdf.text(`${entry.name} (${entry.hex}) — ${entry.count} szt.`, MARGIN_MM + 10, cursorY);
+        pdf.text(
+          `${entry.name} (${entry.hex}) — ${entry.count} szt.`,
+          MARGIN_MM + 10,
+          cursorY
+        );
         cursorY += LINE_HEIGHT_MM;
       }
 
-      // Sekcja rzędów — również z ochroną przed przepełnieniem strony.
+      // Fix #2: sekcja rzędów z rzeczywistymi kolorami z patternMap
       cursorY = ensureLineSpace(pdf, cursorY + LINE_HEIGHT_MM, 'Schemat rzędów');
       pdf.setFontSize(12);
       pdf.text('Schemat rzędów', MARGIN_MM, cursorY);
       cursorY += LINE_HEIGHT_MM;
 
-      pdf.setFontSize(10);
-      for (let row = 0; row < project.ornamentSpec.segmentRows; row++) {
+      pdf.setFontSize(9);
+      for (const rowInstruction of rowInstructions) {
         cursorY = ensureLineSpace(pdf, cursorY, 'Schemat rzędów — cd.');
-        pdf.text(
-          `Rząd ${row + 1}: ${row + 1} kolumn(y) w segmencie`,
-          MARGIN_MM,
-          cursorY
-        );
-        cursorY += LINE_HEIGHT_MM;
+        pdf.setTextColor(30, 30, 30);
+        pdf.text(`Rząd ${rowInstruction.row + 1}:`, MARGIN_MM, cursorY);
+
+        let cellX = MARGIN_MM + 22;
+        for (const cell of rowInstruction.cells) {
+          const rgb = hexToRgb(cell.colorHex);
+          if (rgb) {
+            pdf.setFillColor(rgb.r, rgb.g, rgb.b);
+            pdf.rect(cellX, cursorY - 3.5, 5, 5, 'F');
+          }
+          pdf.setTextColor(60, 60, 60);
+          pdf.text(cell.colorName.slice(0, 6), cellX + 6, cursorY);
+          cellX += 26;
+          if (cellX > PAGE_WIDTH_MM - MARGIN_MM - 30) {
+            cellX = MARGIN_MM + 22;
+            cursorY += LINE_HEIGHT_MM;
+            cursorY = ensureLineSpace(pdf, cursorY, 'Schemat rzędów — cd.');
+          }
+        }
+        cursorY += LINE_HEIGHT_MM + 2;
       }
 
       pdf.save(`${project.name}.pdf`);
@@ -178,7 +249,7 @@ export default function ExportPanel({ project }: ExportPanelProps) {
     } finally {
       setIsExporting(false);
     }
-  }, [activeProjectId, bomEntries, invalidColors, project]);
+  }, [bomEntries, invalidColors, project, rowInstructions]);
 
   return (
     <section aria-label="Panel eksportu" className="export-panel">

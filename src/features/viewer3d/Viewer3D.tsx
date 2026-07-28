@@ -1,6 +1,7 @@
 tsx
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { ProjectionEngine } from '@/domain/projection/ProjectionEngine';
 import type { Project } from '@/shared/types';
 
@@ -9,161 +10,129 @@ interface Viewer3DProps {
 }
 
 export default function Viewer3D({ project }: Viewer3DProps) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mountRef = useRef<HTMLDivElement | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const sphereMeshRef = useRef<THREE.Mesh | null>(null);
+  const textureRef = useRef<THREE.CanvasTexture | null>(null);
+  const animFrameRef = useRef<number>(0);
 
+  // Fix #5: scena inicjalizowana TYLKO RAZ na mount — zależność []
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
+    const mount = mountRef.current;
+    if (!mount) return;
 
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#11111f');
-
-    const camera = new THREE.PerspectiveCamera(
-      45,
-      container.clientWidth / Math.max(container.clientHeight, 1),
-      0.1,
-      100
-    );
-    camera.position.set(0, 0.4, 2.2);
+    const width = mount.clientWidth || 640;
+    const height = mount.clientHeight || 480;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    container.appendChild(renderer.domElement);
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    mount.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
 
-    const ambient = new THREE.AmbientLight(0xffffff, 0.7);
-    const directional = new THREE.DirectionalLight(0xffffff, 1.1);
-    directional.position.set(2, 3, 4);
-    scene.add(ambient, directional);
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#0f0f1a');
+    sceneRef.current = scene;
 
-    const engine = new ProjectionEngine(project);
-    const { textureCanvas } = engine.project2D();
-    const texture = new THREE.CanvasTexture(textureCanvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
+    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 1000);
+    camera.position.set(0, 0, 2.5);
+    cameraRef.current = camera;
 
-    const radiusMm = project.ornamentSpec.diameterMm / 2;
-    const radius = Math.max(radiusMm / 50, 0.3);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
 
-    // Referencje do zasobów GPU — wszystkie dispozowane w cleanup.
-    const geometry = new THREE.SphereGeometry(radius, 96, 64);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    directionalLight.position.set(5, 5, 5);
+    scene.add(directionalLight);
+
+    const geometry = new THREE.SphereGeometry(1, 64, 64);
     const material = new THREE.MeshStandardMaterial({
-      map: texture,
-      roughness: 0.35,
-      metalness: 0.05,
+      roughness: 0.4,
+      metalness: 0.1,
     });
-    const ornament = new THREE.Mesh(geometry, material);
-    scene.add(ornament);
+    const sphereMesh = new THREE.Mesh(geometry, material);
+    scene.add(sphereMesh);
+    sphereMeshRef.current = sphereMesh;
 
-    const rotation = { x: 0, y: 0 };
-    const target = { x: 0.4, y: 0.6 };
-    let isDragging = false;
-    let lastX = 0;
-    let lastY = 0;
-    let lastTouchDistance: number | null = null;
-    let animationFrameId = 0;
-
-    const handlePointerDown = (event: PointerEvent) => {
-      isDragging = true;
-      lastX = event.clientX;
-      lastY = event.clientY;
-    };
-    const handlePointerMove = (event: PointerEvent) => {
-      if (!isDragging) return;
-      target.y += (event.clientX - lastX) * 0.005;
-      target.x += (event.clientY - lastY) * 0.005;
-      lastX = event.clientX;
-      lastY = event.clientY;
-    };
-    const handlePointerUp = () => {
-      isDragging = false;
-    };
-    const handleWheel = (event: WheelEvent) => {
-      camera.position.z = Math.min(
-        5,
-        Math.max(0.8, camera.position.z + event.deltaY * 0.001)
-      );
-    };
-
-    const handleTouchStart = (event: TouchEvent) => {
-      if (event.touches.length === 2) {
-        const [a, b] = [event.touches[0], event.touches[1]];
-        if (!a || !b) return;
-        lastTouchDistance = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-      }
-    };
-    const handleTouchMove = (event: TouchEvent) => {
-      if (event.touches.length === 2 && lastTouchDistance !== null) {
-        const [a, b] = [event.touches[0], event.touches[1]];
-        if (!a || !b) return;
-        const distance = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-        camera.position.z = Math.min(
-          5,
-          Math.max(0.8, camera.position.z - (distance - lastTouchDistance) * 0.005)
-        );
-        lastTouchDistance = distance;
-        event.preventDefault();
-      }
-    };
-    const handleTouchEnd = () => {
-      lastTouchDistance = null;
-    };
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.minDistance = 1.5;
+    controls.maxDistance = 6;
 
     const handleResize = () => {
-      const width = container.clientWidth;
-      const height = Math.max(container.clientHeight, 1);
-      camera.aspect = width / height;
+      const w = mount.clientWidth;
+      const h = mount.clientHeight;
+      if (w === 0 || h === 0) return;
+      camera.aspect = w / h;
       camera.updateProjectionMatrix();
-      renderer.setSize(width, height);
+      renderer.setSize(w, h);
     };
 
-    const element = renderer.domElement;
-    element.addEventListener('pointerdown', handlePointerDown);
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-    element.addEventListener('wheel', handleWheel, { passive: true });
-    element.addEventListener('touchstart', handleTouchStart, { passive: true });
-    element.addEventListener('touchmove', handleTouchMove, { passive: false });
-    element.addEventListener('touchend', handleTouchEnd);
-    window.addEventListener('resize', handleResize);
+    const resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(mount);
 
     const animate = () => {
-      rotation.x += (target.x - rotation.x) * 0.08;
-      rotation.y += (target.y - rotation.y) * 0.08;
-      ornament.rotation.set(rotation.x, rotation.y, 0);
+      animFrameRef.current = requestAnimationFrame(animate);
+      controls.update();
       renderer.render(scene, camera);
-      animationFrameId = window.requestAnimationFrame(animate);
     };
     animate();
 
     return () => {
-      window.cancelAnimationFrame(animationFrameId);
-
-      // Pełny cleanup wszystkich listenerów — w tym touch.
-      element.removeEventListener('pointerdown', handlePointerDown);
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      element.removeEventListener('wheel', handleWheel);
-      element.removeEventListener('touchstart', handleTouchStart);
-      element.removeEventListener('touchmove', handleTouchMove);
-      element.removeEventListener('touchend', handleTouchEnd);
-      window.removeEventListener('resize', handleResize);
-
-      // Dispozycja zasobów GPU — geometria, materiał, tekstura, renderer.
-      scene.remove(ornament);
+      cancelAnimationFrame(animFrameRef.current);
+      resizeObserver.disconnect();
+      controls.dispose();
+      renderer.dispose();
       geometry.dispose();
       material.dispose();
-      texture.dispose();
-      renderer.dispose();
-
-      if (element.parentElement === container) {
-        container.removeChild(element);
+      if (mount.contains(renderer.domElement)) {
+        mount.removeChild(renderer.domElement);
       }
+      rendererRef.current = null;
+      sceneRef.current = null;
+      cameraRef.current = null;
+      sphereMeshRef.current = null;
+      textureRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Fix #5: aktualizacja TYLKO tekstury przy zmianie projektu —
+  // scena, geometria, materiał i renderer nie są odtwarzane
+  useEffect(() => {
+    const sphereMesh = sphereMeshRef.current;
+    if (!sphereMesh) return;
+
+    const engine = new ProjectionEngine(project);
+    const result = engine.project2D();
+
+    if (textureRef.current) {
+      textureRef.current.dispose();
+    }
+
+    const texture = new THREE.CanvasTexture(result.textureCanvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    textureRef.current = texture;
+
+    const material = sphereMesh.material as THREE.MeshStandardMaterial;
+    material.map = texture;
+    material.needsUpdate = true;
   }, [project]);
 
   return (
-    <section aria-label="Podgląd 3D ornamentu" className="viewer3d">
-      <div ref={containerRef} className="viewer3d__canvas" />
+    <section aria-label="Podgląd 3D" className="viewer-3d">
+      <div
+        ref={mountRef}
+        className="viewer-3d__canvas-container"
+        aria-label="Interaktywny podgląd ornamentu 3D"
+        role="img"
+      />
+      <p className="viewer-3d__hint">
+        Przeciągnij aby obrócić · Scroll aby przybliżyć
+      </p>
     </section>
   );
 }

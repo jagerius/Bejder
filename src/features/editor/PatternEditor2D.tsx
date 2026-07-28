@@ -1,5 +1,5 @@
 tsx
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '@/app/store';
 import {
   setEditorZoom,
@@ -19,6 +19,11 @@ interface CellPosition {
   size: number;
 }
 
+interface CellHit {
+  segment: Segment;
+  cell: BeadCell;
+}
+
 const CELL_SIZE = 28;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 4;
@@ -29,7 +34,6 @@ function clampZoom(value: number): number {
 
 export default function PatternEditor2D({ project }: PatternEditor2DProps) {
   const dispatch = useAppDispatch();
-  // Źródłem prawdy dla zoom/pan jest editorSlice — brak lokalnego duplikatu stanu.
   const zoom = useAppSelector((state) => state.editor.zoom);
   const pan = useAppSelector((state) => state.editor.pan);
   const selectedColorId = useAppSelector((state) => state.editor.selectedColorId);
@@ -52,7 +56,8 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     let maxY = 0;
 
     project.segments.forEach((segment, segmentIndex) => {
-      const segmentOffsetX = segmentIndex * (project.ornamentSpec.segmentRows + 1) * CELL_SIZE;
+      const segmentOffsetX =
+        segmentIndex * (project.ornamentSpec.segmentRows + 1) * CELL_SIZE;
       for (const cell of segment.cells) {
         const colsInRow = cell.row + 1;
         const rowWidth = colsInRow * CELL_SIZE;
@@ -67,8 +72,17 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     return { positions, width: maxX + CELL_SIZE, height: maxY + CELL_SIZE };
   }, [project.segments, project.ornamentSpec.segmentRows]);
 
-  // Stabilne referencje dzięki useCallback — nie zmieniają się między renderami,
-  // o ile nie zmienią się ich zależności.
+  // Fix #2: przestrzenny indeks cellId → {segment, cell} — lookup O(1) zamiast O(segments×cells)
+  const cellHitIndex = useMemo<Map<string, CellHit>>(() => {
+    const index = new Map<string, CellHit>();
+    for (const segment of project.segments) {
+      for (const cell of segment.cells) {
+        index.set(cell.id, { segment, cell });
+      }
+    }
+    return index;
+  }, [project.segments]);
+
   const getCellColor = useCallback(
     (cell: BeadCell): string => {
       const colorId = project.patternMap[cell.id];
@@ -85,39 +99,44 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     [layout.positions]
   );
 
+  // Fix #2: findCellAtPoint używa indeksu przestrzennego — O(n) po cellHitIndex,
+  // ale iteruje tylko raz przez layout.positions bez zagnieżdżonej pętli segmentów
   const findCellAtPoint = useCallback(
-    (clientX: number, clientY: number): { segment: Segment; cell: BeadCell } | null => {
+    (clientX: number, clientY: number): CellHit | null => {
       const canvas = canvasRef.current;
       if (!canvas) return null;
       const rect = canvas.getBoundingClientRect();
       const worldX = (clientX - rect.left - pan.x) / zoom;
       const worldY = (clientY - rect.top - pan.y) / zoom;
 
-      for (const segment of project.segments) {
-        for (const cell of segment.cells) {
-          const position = getCellPosition(cell);
-          if (!position) continue;
-          const dx = worldX - position.x;
-          const dy = worldY - position.y;
-          const radius = position.size / 2;
-          if (dx * dx + dy * dy <= radius * radius) {
-            return { segment, cell };
-          }
+      for (const [cellId, position] of layout.positions) {
+        const dx = worldX - position.x;
+        const dy = worldY - position.y;
+        const radius = position.size / 2;
+        if (dx * dx + dy * dy <= radius * radius) {
+          const hit = cellHitIndex.get(cellId);
+          if (hit) return hit;
         }
       }
       return null;
     },
-    [project.segments, getCellPosition, pan.x, pan.y, zoom]
+    [layout.positions, cellHitIndex, pan.x, pan.y, zoom]
   );
 
+  // Fix #3: resize canvasu TYLKO gdy zmienia się layout — nie przy każdym zoom/pan
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.width = layout.width;
+    canvas.height = layout.height;
+  }, [layout]);
+
+  // Fix #3: rysowanie bez dotykania canvas.width/height — nie powoduje czyszczenia
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-
-    canvas.width = layout.width * zoom;
-    canvas.height = layout.height * zoom;
 
     ctx.save();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -173,8 +192,6 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
       return;
     }
 
-    // Snapshot historii tylko raz — na początku pociągnięcia pędzla,
-    // a nie przy każdej malowanej komórce.
     dispatch(pushHistory(project.patternMap));
     isPaintingRef.current = true;
     paintCell(event.clientX, event.clientY);
@@ -185,7 +202,10 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
 
     if (isPanningRef.current && last) {
       dispatch(
-        setEditorPan({ x: pan.x + event.clientX - last.x, y: pan.y + event.clientY - last.y })
+        setEditorPan({
+          x: pan.x + event.clientX - last.x,
+          y: pan.y + event.clientY - last.y,
+        })
       );
       lastPointerRef.current = { x: event.clientX, y: event.clientY };
       return;
@@ -211,9 +231,11 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
 
   return (
     <section aria-label="Edytor wzoru 2D" className="pattern-editor">
+      {/* Fix #4: aria-label na canvas dla dostępności */}
       <canvas
         ref={canvasRef}
         className="pattern-editor__canvas"
+        aria-label="Edytor wzoru koralikowego"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}

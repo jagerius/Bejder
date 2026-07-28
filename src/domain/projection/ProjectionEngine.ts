@@ -37,6 +37,11 @@ export class ProjectionEngine {
     const segCount = ornamentSpec.segmentCount;
     const rows = ornamentSpec.segmentRows;
 
+    // Fix #1: guard against division by zero when rows === 0
+    if (rows <= 0) {
+      throw new Error('ornamentSpec.segmentRows musi być większe od 0');
+    }
+
     const beadHeight = (resolution / 2 / rows) * 0.5 * 0.85;
     const beadWidthByRow = Array.from({ length: rows }, (_, row) => {
       const colsInRow = row + 1;

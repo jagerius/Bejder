@@ -10,55 +10,8 @@ import {
 } from '@/app/store/projectSlice';
 import type { Project } from '@/shared/types';
 import { ORNAMENT_PRESETS } from '@/shared/constants';
-
-const beadColorSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  hex: z.string().regex(/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/),
-});
-
-const ornamentSpecSchema = z.object({
-  diameterMm: z.number().positive(),
-  segmentCount: z.number().int().positive(),
-  segmentRows: z.number().int().positive(),
-  constructionType: z.literal('triangular-modular'),
-});
-
-const beadCellSchema = z.object({
-  id: z.string().min(1),
-  row: z.number().int().nonnegative(),
-  col: z.number().int().nonnegative(),
-});
-
-const segmentSchema = z.object({
-  id: z.string().min(1),
-  index: z.number().int().nonnegative(),
-  cells: z.array(beadCellSchema),
-});
-
-const projectSchema = z.object({
-  version: z.string().min(1),
-  schemaVersion: z.number().int().positive(),
-  projectId: z.string().min(1),
-  name: z.string().min(1),
-  ornamentSpec: ornamentSpecSchema,
-  palette: z.object({ colors: z.array(beadColorSchema) }),
-  segments: z.array(segmentSchema),
-  patternMap: z.record(z.string()),
-  symmetry: z.object({
-    mode: z.enum(['radial', 'mirror', 'free']),
-    sourceSegmentId: z.string().nullable(),
-  }),
-  projectionConfig: z.object({
-    type: z.literal('mercator'),
-    resolution: z.number().int().positive(),
-  }),
-  metadata: z.object({
-    author: z.string(),
-    createdAt: z.string(),
-    updatedAt: z.string(),
-  }),
-});
+// Fix #2: import projectSchema from persistence.ts — eliminuje duplikację definicji Zod
+import { projectSchema } from '@/shared/utils/persistence';
 
 function getUniqueProjectName(
   desiredName: string,
@@ -107,7 +60,7 @@ export default function Dashboard() {
     setNotice(
       uniqueName === projectName.trim()
         ? null
-        : `Nazwa została zmieniona na „${uniqueName}”, aby uniknąć duplikatu.`
+        : `Nazwa została zmieniona na „${uniqueName}", aby uniknąć duplikatu.`
     );
     setImportError(null);
   };
@@ -145,10 +98,10 @@ export default function Dashboard() {
         setImportError(null);
         setNotice(
           existing
-            ? `Projekt „${uniqueName}” został zaktualizowany.`
+            ? `Projekt „${uniqueName}" został zaktualizowany.`
             : uniqueName === validated.name
-              ? `Zaimportowano projekt „${uniqueName}”.`
-              : `Zaimportowano projekt jako „${uniqueName}”, aby uniknąć duplikatu nazwy.`
+              ? `Zaimportowano projekt „${uniqueName}".`
+              : `Zaimportowano projekt jako „${uniqueName}", aby uniknąć duplikatu nazwy.`
         );
       } catch (error) {
         setNotice(null);
@@ -168,6 +121,13 @@ export default function Dashboard() {
       setImportError('Nie udało się odczytać pliku.');
     };
     reader.readAsText(file);
+  };
+
+  // Fix #3: handleDeleteProject czyści notice przed usunięciem projektu
+  const handleDeleteProject = (projectId: string) => {
+    setNotice(null);
+    setImportError(null);
+    dispatch(deleteProject(projectId));
   };
 
   return (
@@ -242,7 +202,7 @@ export default function Dashboard() {
                 <button
                   type="button"
                   aria-label={`Usuń projekt ${project.name}`}
-                  onClick={() => dispatch(deleteProject(project.projectId))}
+                  onClick={() => handleDeleteProject(project.projectId)}
                 >
                   Usuń
                 </button>

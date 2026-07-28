@@ -32,7 +32,7 @@ const segmentSchema = z.object({
   cells: z.array(beadCellSchema),
 });
 
-const projectSchema = z.object({
+export const projectSchema = z.object({
   version: z.string().min(1),
   schemaVersion: z.number().int().positive(),
   projectId: z.string().min(1),
@@ -57,7 +57,9 @@ const projectSchema = z.object({
 });
 
 /**
- * Serializacja i walidacja projektu do JSON.
+ * Fix #3: serializacja projektu do JSON string.
+ * Call-site, które potrzebują side-effect (pobranie pliku), powinny
+ * używać downloadProjectJSON zamiast wywoływać exportProjectToJSON bez konsumpcji wyniku.
  */
 export function exportProjectToJSON(project: Project): string {
   const validated = projectSchema.parse(project);
@@ -65,9 +67,25 @@ export function exportProjectToJSON(project: Project): string {
 }
 
 /**
- * Parsowanie i walidacja JSON — struktura jest sprawdzana schematem Zod,
- * zanim obiekt trafi do store. Rzuca z.ZodError przy niezgodności
- * oraz Error przy nieobsługiwanej wersji.
+ * Pomocnik dla call-site oczekujących side-effect:
+ * serializuje projekt i inicjuje pobranie pliku JSON w przeglądarce.
+ */
+export function downloadProjectJSON(project: Project): void {
+  const json = exportProjectToJSON(project);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${project.name}.json`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Parsowanie i walidacja JSON — rzuca ZodError przy niezgodności struktury
+ * oraz Error przy nieobsługiwanej wersji formatu lub schematu.
  */
 export function importProjectFromJSON(raw: string): Project {
   let parsed: unknown;
@@ -91,12 +109,6 @@ export function importProjectFromJSON(raw: string): Project {
   return project;
 }
 
-/**
- * Promise cache zamiast singletonu IDBDatabase — eliminuje race condition
- * przy równoległych wywołaniach openDB: wszystkie wywołania dzielą jedno
- * (wspólne) Promise otwarcia bazy. Po zamknięciu/błędzie połączenia
- * cache jest czyszczony i kolejne wywołanie otworzy bazę ponownie.
- */
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function openDB(): Promise<IDBDatabase> {
@@ -157,12 +169,37 @@ export async function loadProjectFromIDB(projectId: string): Promise<Project | n
         resolve(null);
         return;
       }
-      // Dane z IDB też przechodzą walidację Zod — baza może zawierać stare/zdegradowane rekordy.
       const parsed = projectSchema.safeParse(result);
       resolve(parsed.success ? (parsed.data as Project) : null);
     };
     request.onerror = () =>
       reject(request.error ?? new Error('Odczyt projektu z IndexedDB nie powiódł się.'));
+  });
+}
+
+/**
+ * Fix #2: przywrócony eksport loadProjectsFromIDB —
+ * ładuje wszystkie projekty z IndexedDB z walidacją Zod per rekord.
+ * Rekordy nieprzechodzące walidacji są pomijane (nie powodują błędu całości).
+ */
+export async function loadProjectsFromIDB(): Promise<Project[]> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const request = tx.objectStore(STORE_NAME).getAll();
+    request.onsuccess = () => {
+      const results: unknown[] = request.result;
+      const projects: Project[] = [];
+      for (const result of results) {
+        const parsed = projectSchema.safeParse(result);
+        if (parsed.success) {
+          projects.push(parsed.data as Project);
+        }
+      }
+      resolve(projects);
+    };
+    request.onerror = () =>
+      reject(request.error ?? new Error('Odczyt projektów z IndexedDB nie powiódł się.'));
   });
 }
 

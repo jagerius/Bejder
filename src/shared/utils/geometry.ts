@@ -1,154 +1,160 @@
 typescript
-import type {
-  BeadCell,
-  OrnamentSpec,
-  PatternMap,
-  Project,
-  Segment,
-} from '@/shared/types';
+import type { Segment, PatternMap } from '@/shared/types';
 
-/** UV komórki na mapie sferycznej (mercator). */
+export interface SphereUV {
+  u: number;
+  v: number;
+}
+
+/**
+ * Konwertuje współrzędne komórki w segmencie na UV sfery (Mercator).
+ */
 export function cellToSphereUV(
   segmentIndex: number,
   segmentCount: number,
-  rows: number,
+  totalRows: number,
   row: number,
   col: number
-): { u: number; v: number } {
-  const colsInRow = row + 1;
-  const u =
-    (segmentIndex + (colsInRow > 1 ? col / (colsInRow - 1) : 0.5)) /
-    segmentCount;
-  const v = rows > 1 ? row / (rows - 1) : 0.5;
+): SphereUV {
+  const u = (segmentIndex + (col + 0.5) / (row + 1)) / segmentCount;
+  const v = (row + 0.5) / totalRows;
   return { u, v };
 }
 
-/** Generuje segmenty z komórkami na podstawie specyfikacji ornamentu. */
-export function generateOrnamentSegments(spec: OrnamentSpec): Segment[] {
-  const segments: Segment[] = [];
-  for (let si = 0; si < spec.segmentCount; si++) {
-    const cells: BeadCell[] = [];
-    for (let row = 0; row < spec.segmentRows; row++) {
-      const colsInRow = row + 1;
-      for (let col = 0; col < colsInRow; col++) {
-        cells.push({ id: `s${si}-r${row}-c${col}`, row, col });
+/**
+ * Buduje mapę sąsiedztwa komórki → sąsiedzi (te same lub sąsiednie segmenty).
+ */
+export function buildAdjacencyMap(
+  segments: Segment[]
+): Map<string, string[]> {
+  const adjacency = new Map<string, string[]>();
+  const cellById = new Map<string, { segmentIndex: number; row: number; col: number }>();
+
+  segments.forEach((segment, segmentIndex) => {
+    for (const cell of segment.cells) {
+      cellById.set(cell.id, { segmentIndex, row: cell.row, col: cell.col });
+    }
+  });
+
+  for (const [cellId, { segmentIndex, row, col }] of cellById) {
+    const neighbors: string[] = [];
+
+    // Sąsiedzi w tym samym segmencie
+    for (const [otherId, other] of cellById) {
+      if (otherId === cellId) continue;
+      const sameSegment = other.segmentIndex === segmentIndex;
+      const adjacentSegment =
+        Math.abs(other.segmentIndex - segmentIndex) === 1 ||
+        (segmentIndex === 0 && other.segmentIndex === segments.length - 1) ||
+        (segmentIndex === segments.length - 1 && other.segmentIndex === 0);
+
+      if (sameSegment) {
+        const rowDiff = Math.abs(other.row - row);
+        const colDiff = Math.abs(other.col - col);
+        if ((rowDiff === 1 && colDiff <= 1) || (rowDiff === 0 && colDiff === 1)) {
+          neighbors.push(otherId);
+        }
+      } else if (adjacentSegment && other.row === row && Math.abs(other.col - col) <= 1) {
+        neighbors.push(otherId);
       }
     }
-    segments.push({ id: `segment-${si}`, index: si, cells });
+
+    adjacency.set(cellId, neighbors);
   }
-  return segments;
-}
 
-/** Klucz komórki w lokalnej siatce segmentu. */
-export function cellKey(row: number, col: number): string {
-  return `${row}:${col}`;
-}
-
-/** Sąsiedzi komórki w siatce trójkątnej (w obrębie segmentu). */
-export function getCellNeighbors(
-  cell: BeadCell,
-  cellsByKey: Map<string, BeadCell>
-): BeadCell[] {
-  const candidates: Array<[number, number]> = [
-    [cell.row, cell.col - 1],
-    [cell.row, cell.col + 1],
-    [cell.row - 1, cell.col - 1],
-    [cell.row - 1, cell.col],
-    [cell.row + 1, cell.col],
-    [cell.row + 1, cell.col + 1],
-  ];
-
-  const neighbors: BeadCell[] = [];
-  for (const [row, col] of candidates) {
-    if (row < 0 || col < 0 || col > row) continue;
-    const neighbor = cellsByKey.get(cellKey(row, col));
-    if (neighbor) neighbors.push(neighbor);
-  }
-  return neighbors;
+  return adjacency;
 }
 
 /**
- * Flood fill — BFS (wskaźnik head zamiast kosztownego queue.shift()).
- * Wszystkie lookupy przez Mapy O(1) — całkowita złożoność O(n),
- * zamiast wcześniejszego O(n²) z cells.filter wewnątrz pętli.
+ * Fix #1: floodFill — poprawna sygnatura i eksport.
+ * Wypełnia obszar komórek o tym samym kolorze co startCellId,
+ * zamieniając je na newColorId (lub usuwa gdy null).
+ * Zwraca nowy PatternMap — nie mutuje wejścia.
  */
 export function floodFill(
-  segment: Segment,
+  segments: Segment[],
+  patternMap: PatternMap,
   startCellId: string,
-  targetColorId: string | null,
-  replacementColorId: string,
-  patternMap: PatternMap
+  newColorId: string | null
 ): PatternMap {
-  const cellsById = new Map(segment.cells.map((cell) => [cell.id, cell]));
-  const cellsByKey = new Map(
-    segment.cells.map((cell) => [cellKey(cell.row, cell.col), cell])
-  );
+  const adjacency = buildAdjacencyMap(segments);
+  const startColor = patternMap[startCellId] ?? null;
 
-  const start = cellsById.get(startCellId);
-  if (!start) return patternMap;
+  const visited = new Set<string>();
+  const queue: string[] = [startCellId];
+  const nextMap: PatternMap = { ...patternMap };
 
-  const startColor = patternMap[startCellId] ?? targetColorId;
-  const replacement = replacementColorId;
-  if (startColor === replacement) return patternMap;
+  while (queue.length > 0) {
+    const cellId = queue.shift()!;
+    if (visited.has(cellId)) continue;
+    visited.add(cellId);
 
-  const next: PatternMap = { ...patternMap };
-  const visited = new Set<string>([startCellId]);
-  const queue: BeadCell[] = [start];
-  let head = 0;
+    const cellColor = nextMap[cellId] ?? null;
+    if (cellColor !== startColor) continue;
 
-  while (head < queue.length) {
-    const cell = queue[head];
-    head += 1;
-    if (!cell) break;
-
-    next[cell.id] = replacement;
-
-    // Sąsiedzi przez Mapę O(1) — brak cells.filter.
-    for (const neighbor of getCellNeighbors(cell, cellsByKey)) {
-      if (visited.has(neighbor.id)) continue;
-      const neighborColor = next[neighbor.id] ?? targetColorId;
-      if (neighborColor !== startColor) continue;
-      visited.add(neighbor.id);
-      queue.push(neighbor);
+    if (newColorId === null) {
+      delete nextMap[cellId];
+    } else {
+      nextMap[cellId] = newColorId;
     }
-  }
 
-  return next;
-}
-
-/**
- * Kopiuje wzór z segmentu źródłowego na wszystkie pozostałe segmenty (symetria radialna).
- * Lookup komórek przez Mapę z kluczem row:col — O(1) zamiast cells.find O(n),
- * co redukuje całkowitą złożoność z O(n²) do O(n).
- */
-export function applyRadialSymmetry(project: Project): PatternMap {
-  const { segments, symmetry, patternMap } = project;
-  const sourceSegment =
-    segments.find((segment) => segment.id === symmetry.sourceSegmentId) ??
-    segments[0];
-
-  if (!sourceSegment) return { ...patternMap };
-
-  // Indeks komórek źródłowych po współrzędnych — budowany raz, O(n).
-  const sourceByKey = new Map(
-    sourceSegment.cells.map((cell) => [cellKey(cell.row, cell.col), cell])
-  );
-
-  const next: PatternMap = { ...patternMap };
-
-  for (const segment of segments) {
-    if (segment.id === sourceSegment.id) continue;
-    for (const cell of segment.cells) {
-      const sourceCell = sourceByKey.get(cellKey(cell.row, cell.col));
-      if (!sourceCell) continue;
-      const sourceColor = patternMap[sourceCell.id];
-      if (sourceColor) {
-        next[cell.id] = sourceColor;
-      } else {
-        delete next[cell.id];
+    const neighbors = adjacency.get(cellId) ?? [];
+    for (const neighborId of neighbors) {
+      if (!visited.has(neighborId)) {
+        queue.push(neighborId);
       }
     }
   }
 
-  return next;
+  return nextMap;
+}
+
+/**
+ * Fix #1: applyRadialSymmetry — poprawna sygnatura i eksport.
+ * Kopiuje kolory z sourceSegmentId do wszystkich pozostałych segmentów,
+ * zachowując pozycję (row, col) każdej komórki.
+ * Zwraca nowy PatternMap — nie mutuje wejścia.
+ */
+export function applyRadialSymmetry(
+  segments: Segment[],
+  patternMap: PatternMap,
+  sourceSegmentId: string
+): PatternMap {
+  const sourceSegment = segments.find((s) => s.id === sourceSegmentId);
+  if (!sourceSegment) return { ...patternMap };
+
+  // Budujemy mapę (row, col) → colorId z segmentu źródłowego
+  const sourcePattern = new Map<string, string>();
+  for (const cell of sourceSegment.cells) {
+    const colorId = patternMap[cell.id];
+    if (colorId) {
+      sourcePattern.set(`${cell.row}:${cell.col}`, colorId);
+    }
+  }
+
+  const nextMap: PatternMap = { ...patternMap };
+
+  for (const segment of segments) {
+    if (segment.id === sourceSegmentId) continue;
+    for (const cell of segment.cells) {
+      const key = `${cell.row}:${cell.col}`;
+      const colorId = sourcePattern.get(key);
+      if (colorId !== undefined) {
+        nextMap[cell.id] = colorId;
+      } else {
+        delete nextMap[cell.id];
+      }
+    }
+  }
+
+  return nextMap;
+}
+
+/**
+ * Odległość euklidesowa między dwoma punktami UV.
+ */
+export function uvDistance(a: SphereUV, b: SphereUV): number {
+  const du = a.u - b.u;
+  const dv = a.v - b.v;
+  return Math.sqrt(du * du + dv * dv);
 }

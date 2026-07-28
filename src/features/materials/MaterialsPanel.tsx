@@ -1,119 +1,170 @@
 tsx
-import { useMemo, useState } from 'react';
-import { useAppDispatch } from '@/app/store';
-import { addColor, removeColor } from '@/app/store/projectSlice';
-import type { BeadColor, Project } from '@/shared/types';
-import { v4 as uuidv4 } from 'uuid';
+import { useMemo } from 'react';
+import type { Project } from '@/shared/types';
 
 interface MaterialsPanelProps {
   project: Project;
 }
 
-const HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+interface MaterialEntry {
+  colorId: string;
+  name: string;
+  hex: string;
+  count: number;
+}
+
+interface RowGroup {
+  row: number;
+  totalCells: number;
+  coloredCells: number;
+  colors: { colorId: string; name: string; hex: string; count: number }[];
+}
 
 export default function MaterialsPanel({ project }: MaterialsPanelProps) {
-  const dispatch = useAppDispatch();
-  const [newColorName, setNewColorName] = useState('');
-  const [newColorHex, setNewColorHex] = useState('#aabbcc');
-  const [error, setError] = useState<string | null>(null);
-
-  // colorMap w useMemo — tworzony ponownie tylko przy zmianie palety,
-  // a nie przy każdym renderze komponentu.
   const colorMap = useMemo(
     () => new Map(project.palette.colors.map((color) => [color.id, color])),
     [project.palette.colors]
   );
 
-  const usageCounts = useMemo(() => {
+  // Fix #3: statystyki — łączna liczba koralików i liczba użytych kolorów
+  const stats = useMemo(() => {
+    let totalBeads = 0;
+    for (const segment of project.segments) {
+      totalBeads += segment.cells.length;
+    }
+    const usedColorIds = new Set(Object.values(project.patternMap));
+    return {
+      totalBeads,
+      coloredBeads: Object.keys(project.patternMap).length,
+      usedColors: usedColorIds.size,
+      totalColors: project.palette.colors.length,
+    };
+  }, [project.segments, project.patternMap, project.palette.colors]);
+
+  // Fix #3: instrukcje rzędami — grupowanie komórek po row z kolorami
+  const rowGroups = useMemo<RowGroup[]>(() => {
+    const rowMap = new Map<number, { total: number; colorCounts: Map<string, number> }>();
+
+    for (const segment of project.segments) {
+      for (const cell of segment.cells) {
+        if (!rowMap.has(cell.row)) {
+          rowMap.set(cell.row, { total: 0, colorCounts: new Map() });
+        }
+        const entry = rowMap.get(cell.row)!;
+        entry.total += 1;
+
+        const colorId = project.patternMap[cell.id];
+        if (colorId) {
+          entry.colorCounts.set(colorId, (entry.colorCounts.get(colorId) ?? 0) + 1);
+        }
+      }
+    }
+
+    return Array.from(rowMap.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([row, { total, colorCounts }]) => {
+        const coloredCells = Array.from(colorCounts.values()).reduce((s, c) => s + c, 0);
+        const colors = Array.from(colorCounts.entries())
+          .map(([colorId, count]) => {
+            const color = colorMap.get(colorId);
+            return color
+              ? { colorId, name: color.name, hex: color.hex, count }
+              : { colorId, name: colorId, hex: '#888', count };
+          })
+          .sort((a, b) => b.count - a.count);
+
+        return { row, totalCells: total, coloredCells, colors };
+      });
+  }, [project.segments, project.patternMap, colorMap]);
+
+  // BOM — lista materiałów per kolor
+  const bomEntries = useMemo<MaterialEntry[]>(() => {
     const counts = new Map<string, number>();
     for (const colorId of Object.values(project.patternMap)) {
       counts.set(colorId, (counts.get(colorId) ?? 0) + 1);
     }
-    return counts;
-  }, [project.patternMap]);
-
-  const handleAddColor = () => {
-    const name = newColorName.trim();
-    if (!name) {
-      setError('Nazwa koloru jest wymagana.');
-      return;
-    }
-    if (!HEX_PATTERN.test(newColorHex)) {
-      setError('Nieprawidłowy format HEX (np. #abc lub #aabbcc).');
-      return;
-    }
-
-    const color: BeadColor = { id: uuidv4(), name, hex: newColorHex };
-    dispatch(addColor({ projectId: project.projectId, color }));
-    setNewColorName('');
-    setError(null);
-  };
-
-  const handleRemoveColor = (colorId: string) => {
-    const used = usageCounts.get(colorId) ?? 0;
-    if (used > 0) {
-      setError(
-        `Kolor „${colorMap.get(colorId)?.name ?? colorId}” jest używany przez ${used} koralików.`
-      );
-      return;
-    }
-    dispatch(removeColor({ projectId: project.projectId, colorId }));
-    setError(null);
-  };
+    return project.palette.colors
+      .map((color) => ({
+        colorId: color.id,
+        name: color.name,
+        hex: color.hex,
+        count: counts.get(color.id) ?? 0,
+      }))
+      .filter((entry) => entry.count > 0)
+      .sort((a, b) => b.count - a.count);
+  }, [project.palette.colors, project.patternMap]);
 
   return (
     <section aria-label="Panel materiałów" className="materials-panel">
       <h2>Materiały</h2>
 
-      <ul className="materials-panel__list">
-        {project.palette.colors.map((color) => (
-          <li key={color.id}>
-            <span
-              className="materials-panel__swatch"
-              style={{ backgroundColor: color.hex }}
-              aria-hidden="true"
-            />
-            <span>{color.name}</span>
-            <code>{color.hex}</code>
-            <span>{usageCounts.get(color.id) ?? 0} szt.</span>
-            <button
-              type="button"
-              aria-label={`Usuń kolor ${color.name}`}
-              onClick={() => handleRemoveColor(color.id)}
-            >
-              Usuń
-            </button>
+      {/* Fix #3: podsumowanie statystyk */}
+      <dl className="materials-panel__stats" aria-label="Statystyki projektu">
+        <div>
+          <dt>Koraliki ogółem</dt>
+          <dd>{stats.totalBeads}</dd>
+        </div>
+        <div>
+          <dt>Koraliki pokolorowane</dt>
+          <dd>{stats.coloredBeads}</dd>
+        </div>
+        <div>
+          <dt>Użytych kolorów</dt>
+          <dd>
+            {stats.usedColors} / {stats.totalColors}
+          </dd>
+        </div>
+      </dl>
+
+      {/* Fix #3: lista materiałów (BOM) */}
+      <h3>Lista materiałów</h3>
+      {bomEntries.length === 0 ? (
+        <p>Brak pokolorowanych koralików.</p>
+      ) : (
+        <ul className="materials-panel__bom">
+          {bomEntries.map((entry) => (
+            <li key={entry.colorId} className="materials-panel__bom-item">
+              <span
+                className="materials-panel__swatch"
+                style={{ backgroundColor: entry.hex }}
+                aria-hidden="true"
+              />
+              <span>{entry.name}</span>
+              <code>{entry.hex}</code>
+              <span>{entry.count} szt.</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Fix #3: instrukcje rzędami */}
+      <h3>Instrukcje rzędami</h3>
+      <ol className="materials-panel__rows">
+        {rowGroups.map((group) => (
+          <li key={group.row} className="materials-panel__row">
+            <header>
+              <strong>Rząd {group.row + 1}</strong>
+              <span>
+                {group.coloredCells} / {group.totalCells} pokolorowanych
+              </span>
+            </header>
+            {group.colors.length > 0 && (
+              <ul className="materials-panel__row-colors">
+                {group.colors.map((color) => (
+                  <li key={color.colorId}>
+                    <span
+                      className="materials-panel__swatch"
+                      style={{ backgroundColor: color.hex }}
+                      aria-hidden="true"
+                    />
+                    {color.name} — {color.count} szt.
+                  </li>
+                ))}
+              </ul>
+            )}
           </li>
         ))}
-      </ul>
-
-      <div className="materials-panel__add">
-        <label htmlFor="material-name">Nazwa</label>
-        <input
-          id="material-name"
-          value={newColorName}
-          onChange={(event) => setNewColorName(event.target.value)}
-          maxLength={80}
-        />
-
-        <label htmlFor="material-hex">Kolor HEX</label>
-        <input
-          id="material-hex"
-          value={newColorHex}
-          onChange={(event) => setNewColorHex(event.target.value)}
-          maxLength={9}
-        />
-
-        <button type="button" onClick={handleAddColor}>
-          Dodaj kolor
-        </button>
-      </div>
-
-      {error ? (
-        <p role="alert" className="materials-panel__error">
-          {error}
-        </p>
-      ) : null}
+      </ol>
     </section>
   );
 }
