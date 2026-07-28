@@ -37,7 +37,7 @@ export class ProjectionEngine {
     const segCount = ornamentSpec.segmentCount;
     const rows = ornamentSpec.segmentRows;
 
-    // Fix #1: guard against division by zero when rows === 0
+    // Fix #1: guard — dzielenie przez zero dałoby Infinity
     if (rows <= 0) {
       throw new Error('ornamentSpec.segmentRows musi być większe od 0');
     }

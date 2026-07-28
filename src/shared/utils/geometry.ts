@@ -1,5 +1,5 @@
 typescript
-import type { Segment, PatternMap } from '@/shared/types';
+import type { BeadCell, PatternMap, Segment } from '@/shared/types';
 
 export interface SphereUV {
   u: number;
@@ -7,113 +7,120 @@ export interface SphereUV {
 }
 
 /**
- * Konwertuje współrzędne komórki w segmencie na UV sfery (Mercator).
+ * Fix #1: floodFill i applyRadialSymmetry są poprawnie wyeksportowane.
  */
+
 export function cellToSphereUV(
   segmentIndex: number,
   segmentCount: number,
-  totalRows: number,
+  segmentRows: number,
   row: number,
   col: number
 ): SphereUV {
-  const u = (segmentIndex + (col + 0.5) / (row + 1)) / segmentCount;
-  const v = (row + 0.5) / totalRows;
+  const segmentWidth = 1 / segmentCount;
+  const colsInRow = row + 1;
+  const u = segmentIndex * segmentWidth + ((col + 0.5) / colsInRow) * segmentWidth;
+  const v = (row + 0.5) / segmentRows;
   return { u, v };
 }
 
+export function sphereUVToCellId(
+  segments: Segment[],
+  segmentCount: number,
+  segmentRows: number,
+  u: number,
+  v: number
+): BeadCell | null {
+  const segmentIndex = Math.min(segmentCount - 1, Math.floor(u * segmentCount));
+  const row = Math.min(segmentRows - 1, Math.floor(v * segmentRows));
+  const segment = segments[segmentIndex];
+  if (!segment) return null;
+  const cell = segment.cells.find((c) => c.row === row);
+  return cell ?? null;
+}
+
 /**
- * Buduje mapę sąsiedztwa komórki → sąsiedzi (te same lub sąsiednie segmenty).
+ * Buduje indeks sąsiedztwa: cellId → Set<cellId>.
  */
-export function buildAdjacencyMap(
-  segments: Segment[]
-): Map<string, string[]> {
-  const adjacency = new Map<string, string[]>();
-  const cellById = new Map<string, { segmentIndex: number; row: number; col: number }>();
-
-  segments.forEach((segment, segmentIndex) => {
+export function buildAdjacencyIndex(segments: Segment[]): Map<string, Set<string>> {
+  const rowMap = new Map<string, string[]>();
+  for (const segment of segments) {
     for (const cell of segment.cells) {
-      cellById.set(cell.id, { segmentIndex, row: cell.row, col: cell.col });
+      const key = `${cell.row}`;
+      if (!rowMap.has(key)) rowMap.set(key, []);
+      rowMap.get(key)!.push(cell.id);
     }
-  });
-
-  for (const [cellId, { segmentIndex, row, col }] of cellById) {
-    const neighbors: string[] = [];
-
-    // Sąsiedzi w tym samym segmencie
-    for (const [otherId, other] of cellById) {
-      if (otherId === cellId) continue;
-      const sameSegment = other.segmentIndex === segmentIndex;
-      const adjacentSegment =
-        Math.abs(other.segmentIndex - segmentIndex) === 1 ||
-        (segmentIndex === 0 && other.segmentIndex === segments.length - 1) ||
-        (segmentIndex === segments.length - 1 && other.segmentIndex === 0);
-
-      if (sameSegment) {
-        const rowDiff = Math.abs(other.row - row);
-        const colDiff = Math.abs(other.col - col);
-        if ((rowDiff === 1 && colDiff <= 1) || (rowDiff === 0 && colDiff === 1)) {
-          neighbors.push(otherId);
-        }
-      } else if (adjacentSegment && other.row === row && Math.abs(other.col - col) <= 1) {
-        neighbors.push(otherId);
-      }
-    }
-
-    adjacency.set(cellId, neighbors);
   }
 
+  const adjacency = new Map<string, Set<string>>();
+  for (const segment of segments) {
+    for (const cell of segment.cells) {
+      const neighbors = new Set<string>();
+      const sameRow = segment.cells.filter((c) => c.row === cell.row);
+      const nextCell = sameRow.find((c) => c.col === cell.col + 1);
+      const prevCell = sameRow.find((c) => c.col === cell.col - 1);
+      if (nextCell) neighbors.add(nextCell.id);
+      if (prevCell) neighbors.add(prevCell.id);
+      const rowBelow = segment.cells.filter((c) => c.row === cell.row + 1);
+      const belowLeft = rowBelow.find((c) => c.col === cell.col);
+      const belowRight = rowBelow.find((c) => c.col === cell.col + 1);
+      if (belowLeft) neighbors.add(belowLeft.id);
+      if (belowRight) neighbors.add(belowRight.id);
+      const rowAbove = segment.cells.filter((c) => c.row === cell.row - 1);
+      const aboveLeft = rowAbove.find((c) => c.col === cell.col - 1);
+      const aboveRight = rowAbove.find((c) => c.col === cell.col);
+      if (aboveLeft) neighbors.add(aboveLeft.id);
+      if (aboveRight) neighbors.add(aboveRight.id);
+      adjacency.set(cell.id, neighbors);
+    }
+  }
   return adjacency;
 }
 
 /**
- * Fix #1: floodFill — poprawna sygnatura i eksport.
- * Wypełnia obszar komórek o tym samym kolorze co startCellId,
- * zamieniając je na newColorId (lub usuwa gdy null).
- * Zwraca nowy PatternMap — nie mutuje wejścia.
+ * Fix #1: floodFill — eksportowany z aktualną sygnaturą.
+ * Wypełnia wszystkie komórki w tym samym kolorze co startCellId.
  */
 export function floodFill(
   segments: Segment[],
   patternMap: PatternMap,
   startCellId: string,
-  newColorId: string | null
+  targetColorId: string,
+  adjacency?: Map<string, Set<string>>
 ): PatternMap {
-  const adjacency = buildAdjacencyMap(segments);
+  const adj = adjacency ?? buildAdjacencyIndex(segments);
   const startColor = patternMap[startCellId] ?? null;
-
+  const result: PatternMap = { ...patternMap };
   const visited = new Set<string>();
   const queue: string[] = [startCellId];
-  const nextMap: PatternMap = { ...patternMap };
 
   while (queue.length > 0) {
-    const cellId = queue.shift()!;
-    if (visited.has(cellId)) continue;
-    visited.add(cellId);
+    const currentId = queue.shift()!;
+    if (visited.has(currentId)) continue;
+    visited.add(currentId);
 
-    const cellColor = nextMap[cellId] ?? null;
-    if (cellColor !== startColor) continue;
+    const currentColor = patternMap[currentId] ?? null;
+    if (currentColor !== startColor) continue;
 
-    if (newColorId === null) {
-      delete nextMap[cellId];
+    if (targetColorId) {
+      result[currentId] = targetColorId;
     } else {
-      nextMap[cellId] = newColorId;
+      delete result[currentId];
     }
 
-    const neighbors = adjacency.get(cellId) ?? [];
-    for (const neighborId of neighbors) {
+    for (const neighborId of adj.get(currentId) ?? []) {
       if (!visited.has(neighborId)) {
         queue.push(neighborId);
       }
     }
   }
 
-  return nextMap;
+  return result;
 }
 
 /**
- * Fix #1: applyRadialSymmetry — poprawna sygnatura i eksport.
- * Kopiuje kolory z sourceSegmentId do wszystkich pozostałych segmentów,
- * zachowując pozycję (row, col) każdej komórki.
- * Zwraca nowy PatternMap — nie mutuje wejścia.
+ * Fix #1: applyRadialSymmetry — eksportowany z aktualną sygnaturą.
+ * Kopiuje patternMap segmentu źródłowego na wszystkie pozostałe segmenty.
  */
 export function applyRadialSymmetry(
   segments: Segment[],
@@ -123,7 +130,6 @@ export function applyRadialSymmetry(
   const sourceSegment = segments.find((s) => s.id === sourceSegmentId);
   if (!sourceSegment) return { ...patternMap };
 
-  // Budujemy mapę (row, col) → colorId z segmentu źródłowego
   const sourcePattern = new Map<string, string>();
   for (const cell of sourceSegment.cells) {
     const colorId = patternMap[cell.id];
@@ -132,29 +138,26 @@ export function applyRadialSymmetry(
     }
   }
 
-  const nextMap: PatternMap = { ...patternMap };
-
+  const result: PatternMap = { ...patternMap };
   for (const segment of segments) {
     if (segment.id === sourceSegmentId) continue;
     for (const cell of segment.cells) {
       const key = `${cell.row}:${cell.col}`;
       const colorId = sourcePattern.get(key);
-      if (colorId !== undefined) {
-        nextMap[cell.id] = colorId;
+      if (colorId) {
+        result[cell.id] = colorId;
       } else {
-        delete nextMap[cell.id];
+        delete result[cell.id];
       }
     }
   }
 
-  return nextMap;
+  return result;
 }
 
 /**
- * Odległość euklidesowa między dwoma punktami UV.
+ * Liczba pokolorowanych komórek.
  */
-export function uvDistance(a: SphereUV, b: SphereUV): number {
-  const du = a.u - b.u;
-  const dv = a.v - b.v;
-  return Math.sqrt(du * du + dv * dv);
+export function countColoredBeads(patternMap: PatternMap): number {
+  return Object.keys(patternMap).length;
 }

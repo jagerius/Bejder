@@ -1,4 +1,5 @@
 tsx
+// Fix #1: import React — wymagany dla React.PointerEvent, React.WheelEvent
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '@/app/store';
 import {
@@ -72,7 +73,8 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     return { positions, width: maxX + CELL_SIZE, height: maxY + CELL_SIZE };
   }, [project.segments, project.ornamentSpec.segmentRows]);
 
-  // Fix #2: przestrzenny indeks cellId → {segment, cell} — lookup O(1) zamiast O(segments×cells)
+  // Fix #2: przestrzenny indeks cellId → {segment, cell} budowany raz w useMemo
+  // findCellAtPoint robi O(1) lookup zamiast O(segments × cells) przy każdym pointermove
   const cellHitIndex = useMemo<Map<string, CellHit>>(() => {
     const index = new Map<string, CellHit>();
     for (const segment of project.segments) {
@@ -99,8 +101,7 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     [layout.positions]
   );
 
-  // Fix #2: findCellAtPoint używa indeksu przestrzennego — O(n) po cellHitIndex,
-  // ale iteruje tylko raz przez layout.positions bez zagnieżdżonej pętli segmentów
+  // Fix #2: płaska iteracja po layout.positions + O(1) lookup w cellHitIndex
   const findCellAtPoint = useCallback(
     (clientX: number, clientY: number): CellHit | null => {
       const canvas = canvasRef.current;
@@ -114,8 +115,7 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
         const dy = worldY - position.y;
         const radius = position.size / 2;
         if (dx * dx + dy * dy <= radius * radius) {
-          const hit = cellHitIndex.get(cellId);
-          if (hit) return hit;
+          return cellHitIndex.get(cellId) ?? null;
         }
       }
       return null;
@@ -123,7 +123,7 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     [layout.positions, cellHitIndex, pan.x, pan.y, zoom]
   );
 
-  // Fix #3: resize canvasu TYLKO gdy zmienia się layout — nie przy każdym zoom/pan
+  // Fix #3: resize canvasu TYLKO gdy layout się zmienia — nie przy zoom/pan
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -131,7 +131,7 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     canvas.height = layout.height;
   }, [layout]);
 
-  // Fix #3: rysowanie bez dotykania canvas.width/height — nie powoduje czyszczenia
+  // Fix #3: rysowanie — bez zmiany canvas.width/height, brak kosztownego resetu
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -231,7 +231,7 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
 
   return (
     <section aria-label="Edytor wzoru 2D" className="pattern-editor">
-      {/* Fix #4: aria-label na canvas dla dostępności */}
+      {/* Fix #4: aria-label na canvas */}
       <canvas
         ref={canvasRef}
         className="pattern-editor__canvas"

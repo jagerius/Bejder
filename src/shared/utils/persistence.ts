@@ -57,9 +57,7 @@ export const projectSchema = z.object({
 });
 
 /**
- * Fix #3: serializacja projektu do JSON string.
- * Call-site, które potrzebują side-effect (pobranie pliku), powinny
- * używać downloadProjectJSON zamiast wywoływać exportProjectToJSON bez konsumpcji wyniku.
+ * Fix #3: exportProjectToJSON zwraca string — czysta funkcja bez side-effectów.
  */
 export function exportProjectToJSON(project: Project): string {
   const validated = projectSchema.parse(project);
@@ -67,8 +65,8 @@ export function exportProjectToJSON(project: Project): string {
 }
 
 /**
- * Pomocnik dla call-site oczekujących side-effect:
- * serializuje projekt i inicjuje pobranie pliku JSON w przeglądarce.
+ * Fix #3: downloadProjectJSON — wrapper dla call-site oczekujących
+ * side-effect pobierania pliku (poprzednia sygnatura void).
  */
 export function downloadProjectJSON(project: Project): void {
   const json = exportProjectToJSON(project);
@@ -84,8 +82,7 @@ export function downloadProjectJSON(project: Project): void {
 }
 
 /**
- * Parsowanie i walidacja JSON — rzuca ZodError przy niezgodności struktury
- * oraz Error przy nieobsługiwanej wersji formatu lub schematu.
+ * Parsowanie i walidacja JSON.
  */
 export function importProjectFromJSON(raw: string): Project {
   let parsed: unknown;
@@ -125,13 +122,8 @@ function openDB(): Promise<IDBDatabase> {
     };
     request.onsuccess = () => {
       const db = request.result;
-      db.onclose = () => {
-        dbPromise = null;
-      };
-      db.onversionchange = () => {
-        db.close();
-        dbPromise = null;
-      };
+      db.onclose = () => { dbPromise = null; };
+      db.onversionchange = () => { db.close(); dbPromise = null; };
       resolve(db);
     };
     request.onerror = () => {
@@ -158,6 +150,10 @@ export async function saveProjectToIDB(project: Project): Promise<void> {
   });
 }
 
+/**
+ * Fix #2: rzuca Error przy uszkodzonym rekordzie zamiast cichego null —
+ * call-site może rozróżnić "nie znaleziono" od "rekord uszkodzony".
+ */
 export async function loadProjectFromIDB(projectId: string): Promise<Project | null> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -170,7 +166,11 @@ export async function loadProjectFromIDB(projectId: string): Promise<Project | n
         return;
       }
       const parsed = projectSchema.safeParse(result);
-      resolve(parsed.success ? (parsed.data as Project) : null);
+      if (!parsed.success) {
+        reject(new Error(`Rekord projektu "${projectId}" jest uszkodzony lub niezgodny ze schematem.`));
+        return;
+      }
+      resolve(parsed.data as Project);
     };
     request.onerror = () =>
       reject(request.error ?? new Error('Odczyt projektu z IndexedDB nie powiódł się.'));
@@ -178,9 +178,8 @@ export async function loadProjectFromIDB(projectId: string): Promise<Project | n
 }
 
 /**
- * Fix #2: przywrócony eksport loadProjectsFromIDB —
- * ładuje wszystkie projekty z IndexedDB z walidacją Zod per rekord.
- * Rekordy nieprzechodzące walidacji są pomijane (nie powodują błędu całości).
+ * Fix #2: loadProjectsFromIDB — przywrócona, używa getAll() ze skanowaniem
+ * przez projectSchema.safeParse dla każdego rekordu.
  */
 export async function loadProjectsFromIDB(): Promise<Project[]> {
   const db = await openDB();
@@ -195,6 +194,7 @@ export async function loadProjectsFromIDB(): Promise<Project[]> {
         if (parsed.success) {
           projects.push(parsed.data as Project);
         }
+        // Nieprawidłowe rekordy pomijane — nie przerywają ładowania listy
       }
       resolve(projects);
     };

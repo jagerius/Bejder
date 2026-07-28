@@ -10,7 +10,7 @@ import {
 } from '@/app/store/projectSlice';
 import type { Project } from '@/shared/types';
 import { ORNAMENT_PRESETS } from '@/shared/constants';
-// Fix #2: import projectSchema from persistence.ts — eliminuje duplikację definicji Zod
+// Fix #2: projectSchema importowany z persistence.ts — eliminuje duplikację
 import { projectSchema } from '@/shared/utils/persistence';
 
 function getUniqueProjectName(
@@ -123,7 +123,7 @@ export default function Dashboard() {
     reader.readAsText(file);
   };
 
-  // Fix #3: handleDeleteProject czyści notice przed usunięciem projektu
+  // Fix #3: notice czyszczony przed usunięciem projektu
   const handleDeleteProject = (projectId: string) => {
     setNotice(null);
     setImportError(null);

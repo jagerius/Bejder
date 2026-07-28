@@ -26,7 +26,7 @@ export default function MaterialsPanel({ project }: MaterialsPanelProps) {
     [project.palette.colors]
   );
 
-  // Fix #3: statystyki — łączna liczba koralików i liczba użytych kolorów
+  // Fix #3: statystyki — łączna liczba koralików, pokolorowane, użyte kolory
   const stats = useMemo(() => {
     let totalBeads = 0;
     for (const segment of project.segments) {
@@ -41,25 +41,20 @@ export default function MaterialsPanel({ project }: MaterialsPanelProps) {
     };
   }, [project.segments, project.patternMap, project.palette.colors]);
 
-  // Fix #3: instrukcje rzędami — grupowanie komórek po row z kolorami
+  // Fix #3: instrukcje rzędami — grupowanie komórek po cell.row z kolorami
   const rowGroups = useMemo<RowGroup[]>(() => {
     const rowMap = new Map<number, { total: number; colorCounts: Map<string, number> }>();
-
     for (const segment of project.segments) {
       for (const cell of segment.cells) {
-        if (!rowMap.has(cell.row)) {
-          rowMap.set(cell.row, { total: 0, colorCounts: new Map() });
-        }
+        if (!rowMap.has(cell.row)) rowMap.set(cell.row, { total: 0, colorCounts: new Map() });
         const entry = rowMap.get(cell.row)!;
         entry.total += 1;
-
         const colorId = project.patternMap[cell.id];
         if (colorId) {
           entry.colorCounts.set(colorId, (entry.colorCounts.get(colorId) ?? 0) + 1);
         }
       }
     }
-
     return Array.from(rowMap.entries())
       .sort(([a], [b]) => a - b)
       .map(([row, { total, colorCounts }]) => {
@@ -72,24 +67,17 @@ export default function MaterialsPanel({ project }: MaterialsPanelProps) {
               : { colorId, name: colorId, hex: '#888', count };
           })
           .sort((a, b) => b.count - a.count);
-
         return { row, totalCells: total, coloredCells, colors };
       });
   }, [project.segments, project.patternMap, colorMap]);
 
-  // BOM — lista materiałów per kolor
   const bomEntries = useMemo<MaterialEntry[]>(() => {
     const counts = new Map<string, number>();
     for (const colorId of Object.values(project.patternMap)) {
       counts.set(colorId, (counts.get(colorId) ?? 0) + 1);
     }
     return project.palette.colors
-      .map((color) => ({
-        colorId: color.id,
-        name: color.name,
-        hex: color.hex,
-        count: counts.get(color.id) ?? 0,
-      }))
+      .map((color) => ({ colorId: color.id, name: color.name, hex: color.hex, count: counts.get(color.id) ?? 0 }))
       .filter((entry) => entry.count > 0)
       .sort((a, b) => b.count - a.count);
   }, [project.palette.colors, project.patternMap]);
@@ -110,13 +98,10 @@ export default function MaterialsPanel({ project }: MaterialsPanelProps) {
         </div>
         <div>
           <dt>Użytych kolorów</dt>
-          <dd>
-            {stats.usedColors} / {stats.totalColors}
-          </dd>
+          <dd>{stats.usedColors} / {stats.totalColors}</dd>
         </div>
       </dl>
 
-      {/* Fix #3: lista materiałów (BOM) */}
       <h3>Lista materiałów</h3>
       {bomEntries.length === 0 ? (
         <p>Brak pokolorowanych koralików.</p>
@@ -144,9 +129,7 @@ export default function MaterialsPanel({ project }: MaterialsPanelProps) {
           <li key={group.row} className="materials-panel__row">
             <header>
               <strong>Rząd {group.row + 1}</strong>
-              <span>
-                {group.coloredCells} / {group.totalCells} pokolorowanych
-              </span>
+              <span>{group.coloredCells} / {group.totalCells} pokolorowanych</span>
             </header>
             {group.colors.length > 0 && (
               <ul className="materials-panel__row-colors">

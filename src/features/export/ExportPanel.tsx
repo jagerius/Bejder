@@ -2,6 +2,7 @@ tsx
 import { useCallback, useMemo, useState } from 'react';
 import { jsPDF } from 'jspdf';
 import { ProjectionEngine } from '@/domain/projection/ProjectionEngine';
+import { downloadProjectJSON } from '@/shared/utils/persistence';
 import type { Project } from '@/shared/types';
 
 interface ExportPanelProps {
@@ -22,11 +23,6 @@ interface BomEntry {
   count: number;
 }
 
-interface RowInstruction {
-  row: number;
-  cells: { cellId: string; colorHex: string; colorName: string }[];
-}
-
 const HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 const PAGE_WIDTH_MM = 297;
 const PAGE_HEIGHT_MM = 210;
@@ -34,34 +30,22 @@ const MARGIN_MM = 14;
 const LINE_HEIGHT_MM = 8;
 
 function hexToRgb(hex: string): RgbColor | null {
-  if (!HEX_PATTERN.test(hex)) {
-    return null;
-  }
-
+  if (!HEX_PATTERN.test(hex)) return null;
   let normalized = hex.slice(1);
   if (normalized.length === 3) {
-    normalized = normalized
-      .split('')
-      .map((char) => char + char)
-      .join('');
+    normalized = normalized.split('').map((c) => c + c).join('');
   } else if (normalized.length === 8) {
     normalized = normalized.slice(0, 6);
   }
-
   const r = Number.parseInt(normalized.slice(0, 2), 16);
   const g = Number.parseInt(normalized.slice(2, 4), 16);
   const b = Number.parseInt(normalized.slice(4, 6), 16);
-
-  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) {
-    return null;
-  }
+  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return null;
   return { r, g, b };
 }
 
 function ensureLineSpace(pdf: jsPDF, cursorY: number, title?: string): number {
-  if (cursorY + LINE_HEIGHT_MM <= PAGE_HEIGHT_MM - MARGIN_MM) {
-    return cursorY;
-  }
+  if (cursorY + LINE_HEIGHT_MM <= PAGE_HEIGHT_MM - MARGIN_MM) return cursorY;
   pdf.addPage('a4', 'landscape');
   if (title) {
     pdf.setFontSize(12);
@@ -71,22 +55,14 @@ function ensureLineSpace(pdf: jsPDF, cursorY: number, title?: string): number {
   return MARGIN_MM;
 }
 
-// Fix #1: asynchroniczna konwersja canvas do data URL przez toBlob —
-// nie blokuje głównego wątku przy dużych rozdzielczościach
 function canvasToDataURL(canvas: HTMLCanvasElement): Promise<string> {
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
-      if (!blob) {
-        reject(new Error('toBlob zwrócił null'));
-        return;
-      }
+      if (!blob) { reject(new Error('toBlob zwrócił null')); return; }
       const reader = new FileReader();
       reader.onload = () => {
-        if (typeof reader.result === 'string') {
-          resolve(reader.result);
-        } else {
-          reject(new Error('FileReader zwrócił nie-string wynik'));
-        }
+        if (typeof reader.result === 'string') { resolve(reader.result); }
+        else { reject(new Error('FileReader zwrócił nie-string wynik')); }
       };
       reader.onerror = () => reject(reader.error ?? new Error('FileReader błąd'));
       reader.readAsDataURL(blob);
@@ -104,11 +80,7 @@ export default function ExportPanel({ project }: ExportPanelProps) {
   );
 
   const paletteWithRgb = useMemo(
-    () =>
-      project.palette.colors.map((color) => ({
-        ...color,
-        rgb: hexToRgb(color.hex),
-      })),
+    () => project.palette.colors.map((color) => ({ ...color, rgb: hexToRgb(color.hex) })),
     [project.palette.colors]
   );
 
@@ -133,39 +105,26 @@ export default function ExportPanel({ project }: ExportPanelProps) {
       }));
   }, [paletteWithRgb, project.patternMap]);
 
-  // Fix #2: rzeczywiste kolory z patternMap pogrupowane po rzędach —
-  // zamiast placeholdera eksportujemy konkretne instrukcje koralików
-  const rowInstructions = useMemo<RowInstruction[]>(() => {
-    const rowMap = new Map<number, RowInstruction['cells']>();
-
+  const rowInstructions = useMemo(() => {
+    const rowMap = new Map<number, { colorHex: string; colorName: string }[]>();
     for (const segment of project.segments) {
       for (const cell of segment.cells) {
         const colorId = project.patternMap[cell.id];
         if (!colorId) continue;
         const color = colorMap.get(colorId);
         if (!color) continue;
-
-        if (!rowMap.has(cell.row)) {
-          rowMap.set(cell.row, []);
-        }
-        rowMap.get(cell.row)!.push({
-          cellId: cell.id,
-          colorHex: color.hex,
-          colorName: color.name,
-        });
+        if (!rowMap.has(cell.row)) rowMap.set(cell.row, []);
+        rowMap.get(cell.row)!.push({ colorHex: color.hex, colorName: color.name });
       }
     }
-
-    return Array.from(rowMap.entries())
-      .sort(([a], [b]) => a - b)
-      .map(([row, cells]) => ({ row, cells }));
+    return Array.from(rowMap.entries()).sort(([a], [b]) => a - b);
   }, [project.segments, project.patternMap, colorMap]);
 
   const handleExportPdf = useCallback(async () => {
     if (invalidColors.length > 0) {
       setExportError(
         `Nieprawidłowy format koloru HEX: ${invalidColors
-          .map((color) => `${color.name} (${color.hex})`)
+          .map((c) => `${c.name} (${c.hex})`)
           .join(', ')}`
       );
       return;
@@ -177,8 +136,6 @@ export default function ExportPanel({ project }: ExportPanelProps) {
     try {
       const engine = new ProjectionEngine(project);
       const result = engine.project2D();
-
-      // Fix #1: toBlob zamiast synchronicznego toDataURL
       const image = await canvasToDataURL(result.textureCanvas);
 
       const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
@@ -190,42 +147,33 @@ export default function ExportPanel({ project }: ExportPanelProps) {
         MARGIN_MM,
         24
       );
-
       pdf.addImage(image, 'PNG', MARGIN_MM, 32, PAGE_WIDTH_MM - 2 * MARGIN_MM, 134.5);
 
       let cursorY = ensureLineSpace(pdf, 176, 'Lista materiałów (BOM)');
       pdf.setFontSize(12);
       pdf.text('Lista materiałów (BOM)', MARGIN_MM, cursorY);
       cursorY += LINE_HEIGHT_MM;
-
       pdf.setFontSize(10);
       for (const entry of bomEntries) {
         cursorY = ensureLineSpace(pdf, cursorY, 'Lista materiałów (BOM) — cd.');
         pdf.setFillColor(entry.rgb.r, entry.rgb.g, entry.rgb.b);
         pdf.rect(MARGIN_MM, cursorY - 4, 6, 6, 'F');
         pdf.setTextColor(30, 30, 30);
-        pdf.text(
-          `${entry.name} (${entry.hex}) — ${entry.count} szt.`,
-          MARGIN_MM + 10,
-          cursorY
-        );
+        pdf.text(`${entry.name} (${entry.hex}) — ${entry.count} szt.`, MARGIN_MM + 10, cursorY);
         cursorY += LINE_HEIGHT_MM;
       }
 
-      // Fix #2: sekcja rzędów z rzeczywistymi kolorami z patternMap
       cursorY = ensureLineSpace(pdf, cursorY + LINE_HEIGHT_MM, 'Schemat rzędów');
       pdf.setFontSize(12);
       pdf.text('Schemat rzędów', MARGIN_MM, cursorY);
       cursorY += LINE_HEIGHT_MM;
-
       pdf.setFontSize(9);
-      for (const rowInstruction of rowInstructions) {
+      for (const [row, cells] of rowInstructions) {
         cursorY = ensureLineSpace(pdf, cursorY, 'Schemat rzędów — cd.');
         pdf.setTextColor(30, 30, 30);
-        pdf.text(`Rząd ${rowInstruction.row + 1}:`, MARGIN_MM, cursorY);
-
+        pdf.text(`Rząd ${row + 1}:`, MARGIN_MM, cursorY);
         let cellX = MARGIN_MM + 22;
-        for (const cell of rowInstruction.cells) {
+        for (const cell of cells) {
           const rgb = hexToRgb(cell.colorHex);
           if (rgb) {
             pdf.setFillColor(rgb.r, rgb.g, rgb.b);
@@ -251,10 +199,19 @@ export default function ExportPanel({ project }: ExportPanelProps) {
     }
   }, [bomEntries, invalidColors, project, rowInstructions]);
 
+  // Fix #3: downloadProjectJSON używa zaktualizowanej sygnatury exportProjectToJSON
+  const handleExportJson = useCallback(() => {
+    try {
+      downloadProjectJSON(project);
+      setExportError(null);
+    } catch {
+      setExportError('Eksport JSON nie powiódł się.');
+    }
+  }, [project]);
+
   return (
     <section aria-label="Panel eksportu" className="export-panel">
       <h2>Eksport</h2>
-
       <ul className="export-panel__palette">
         {bomEntries.map((entry) => (
           <li key={entry.colorId}>
@@ -269,7 +226,6 @@ export default function ExportPanel({ project }: ExportPanelProps) {
           </li>
         ))}
       </ul>
-
       {invalidColors.length > 0 ? (
         <ul className="export-panel__invalid-list">
           {invalidColors.map((color) => (
@@ -279,15 +235,16 @@ export default function ExportPanel({ project }: ExportPanelProps) {
           ))}
         </ul>
       ) : null}
-
-      <button type="button" onClick={handleExportPdf} disabled={isExporting}>
-        {isExporting ? 'Eksportowanie…' : 'Eksportuj do PDF'}
-      </button>
-
+      <div className="export-panel__actions">
+        <button type="button" onClick={handleExportPdf} disabled={isExporting}>
+          {isExporting ? 'Eksportowanie…' : 'Eksportuj do PDF'}
+        </button>
+        <button type="button" onClick={handleExportJson}>
+          Eksportuj do JSON
+        </button>
+      </div>
       {exportError ? (
-        <p role="alert" className="export-panel__error">
-          {exportError}
-        </p>
+        <p role="alert" className="export-panel__error">{exportError}</p>
       ) : null}
     </section>
   );

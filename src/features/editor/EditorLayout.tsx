@@ -48,7 +48,7 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
     dispatch(setActiveProject(null));
   };
 
-  // Fix #5: podłączamy <a> do document.body przed .click() — działa poprawnie w Firefox
+  // Fix #5: <a> podłączony do document.body przed .click() — wymagane w Firefox
   const handleExportTexture = () => {
     const engine = new ProjectionEngine(project);
     const result = engine.project2D();
@@ -93,7 +93,7 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
         </dl>
       </section>
 
-      {/* Fix #4: zakładkowa nawigacja — PatternEditor2D, Viewer3D, MaterialsPanel, ExportPanel */}
+      {/* Fix #4: nawigacja zakładkowa z wszystkimi panelami */}
       <nav className="editor-layout__tabs" aria-label="Sekcje edytora">
         {TABS.map((tab) => (
           <button

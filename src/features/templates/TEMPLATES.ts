@@ -2,8 +2,6 @@ typescript
 import type { Project, BeadColor, PatternMap, Segment } from '@/shared/types';
 import { FORMAT_VERSION, SCHEMA_VERSION } from '@/shared/constants';
 
-// ─── Palety koralików ─────────────────────────────────────────────────────────
-
 const PALETTE_CLASSIC: BeadColor[] = [
   { id: 'c-red', name: 'Czerwony', hex: '#c0392b' },
   { id: 'c-gold', name: 'Złoty', hex: '#f39c12' },
@@ -30,8 +28,6 @@ const PALETTE_METALLIC: BeadColor[] = [
   { id: 'm-black', name: 'Czarny metalik', hex: '#1a1a1a' },
 ];
 
-// ─── Budowa segmentów ─────────────────────────────────────────────────────────
-
 function buildSegments(segmentCount: number, segmentRows: number): Segment[] {
   const segments: Segment[] = [];
   for (let si = 0; si < segmentCount; si++) {
@@ -47,14 +43,11 @@ function buildSegments(segmentCount: number, segmentRows: number): Segment[] {
   return segments;
 }
 
-// ─── Wzory ────────────────────────────────────────────────────────────────────
-
 function buildStripesPattern(segments: Segment[], colorIds: string[]): PatternMap {
   const map: PatternMap = {};
   for (const segment of segments) {
     for (const cell of segment.cells) {
-      const colorIndex = cell.row % colorIds.length;
-      map[cell.id] = colorIds[colorIndex];
+      map[cell.id] = colorIds[cell.row % colorIds.length];
     }
   }
   return map;
@@ -77,17 +70,11 @@ function buildGradientPattern(segments: Segment[], colorIds: string[]): PatternM
     const rows = Math.max(...segment.cells.map((c) => c.row)) + 1;
     for (const cell of segment.cells) {
       const t = rows > 1 ? cell.row / (rows - 1) : 0;
-      const colorIndex = Math.min(
-        colorIds.length - 1,
-        Math.floor(t * colorIds.length)
-      );
-      map[cell.id] = colorIds[colorIndex];
+      map[cell.id] = colorIds[Math.min(colorIds.length - 1, Math.floor(t * colorIds.length))];
     }
   }
   return map;
 }
-
-// ─── Fabryka projektu ─────────────────────────────────────────────────────────
 
 interface TemplateOptions {
   name: string;
@@ -102,7 +89,6 @@ interface TemplateOptions {
 function buildProject(options: TemplateOptions): Project {
   const now = new Date().toISOString();
   const segments = buildSegments(options.segmentCount, options.segmentRows);
-
   return {
     version: FORMAT_VERSION,
     schemaVersion: SCHEMA_VERSION,
@@ -123,11 +109,8 @@ function buildProject(options: TemplateOptions): Project {
   };
 }
 
-// ─── Szablony ─────────────────────────────────────────────────────────────────
-
 export function createClassicStripesTemplate(author = 'Szablon'): Project {
   const segments = buildSegments(8, 6);
-  const colorIds = PALETTE_CLASSIC.map((c) => c.id);
   return buildProject({
     name: 'Klasyczne pasy',
     author,
@@ -135,13 +118,12 @@ export function createClassicStripesTemplate(author = 'Szablon'): Project {
     segmentCount: 8,
     segmentRows: 6,
     palette: PALETTE_CLASSIC,
-    patternMap: buildStripesPattern(segments, colorIds),
+    patternMap: buildStripesPattern(segments, PALETTE_CLASSIC.map((c) => c.id)),
   });
 }
 
 export function createRadialClassicTemplate(author = 'Szablon'): Project {
   const segments = buildSegments(8, 6);
-  const colorIds = PALETTE_CLASSIC.map((c) => c.id);
   return buildProject({
     name: 'Klasyczny promienisty',
     author,
@@ -149,13 +131,12 @@ export function createRadialClassicTemplate(author = 'Szablon'): Project {
     segmentCount: 8,
     segmentRows: 6,
     palette: PALETTE_CLASSIC,
-    patternMap: buildRadialPattern(segments, colorIds),
+    patternMap: buildRadialPattern(segments, PALETTE_CLASSIC.map((c) => c.id)),
   });
 }
 
 export function createPastelGradientTemplate(author = 'Szablon'): Project {
   const segments = buildSegments(8, 6);
-  const colorIds = PALETTE_PASTEL.map((c) => c.id);
   return buildProject({
     name: 'Pastelowy gradient',
     author,
@@ -163,13 +144,12 @@ export function createPastelGradientTemplate(author = 'Szablon'): Project {
     segmentCount: 8,
     segmentRows: 6,
     palette: PALETTE_PASTEL,
-    patternMap: buildGradientPattern(segments, colorIds),
+    patternMap: buildGradientPattern(segments, PALETTE_PASTEL.map((c) => c.id)),
   });
 }
 
 export function createMetallicRadialTemplate(author = 'Szablon'): Project {
   const segments = buildSegments(8, 6);
-  const colorIds = PALETTE_METALLIC.map((c) => c.id);
   return buildProject({
     name: 'Metaliczny promienisty',
     author,
@@ -177,7 +157,7 @@ export function createMetallicRadialTemplate(author = 'Szablon'): Project {
     segmentCount: 8,
     segmentRows: 6,
     palette: PALETTE_METALLIC,
-    patternMap: buildRadialPattern(segments, colorIds),
+    patternMap: buildRadialPattern(segments, PALETTE_METALLIC.map((c) => c.id)),
   });
 }
 
@@ -193,13 +173,14 @@ export function createEmptyTemplate(author = 'Szablon'): Project {
   });
 }
 
-/* Fix #4: wiszący komentarz przeniesiony do bloku — był poza jakimkolwiek
-   znacznikiem komentarza i powodował błąd kompilacji TypeScript.
-
-   Eksport szablonów:
-   - createClassicStripesTemplate
-   - createRadialClassicTemplate
-   - createPastelGradientTemplate
-   - createMetallicRadialTemplate
-   - createEmptyTemplate
-*/
+/*
+ * Fix #4: wcześniej wiszący tekst komentarza był poza blokiem komentarza
+ * i powodował błąd kompilacji TypeScript — teraz poprawnie zamknięty w /* *&#47;.
+ *
+ * Eksportowane szablony:
+ *   createClassicStripesTemplate
+ *   createRadialClassicTemplate
+ *   createPastelGradientTemplate
+ *   createMetallicRadialTemplate
+ *   createEmptyTemplate
+ */

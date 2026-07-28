@@ -12,13 +12,11 @@ interface Viewer3DProps {
 export default function Viewer3D({ project }: Viewer3DProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-  const sceneRef = useRef<THREE.Scene | null>(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const sphereMeshRef = useRef<THREE.Mesh | null>(null);
   const textureRef = useRef<THREE.CanvasTexture | null>(null);
   const animFrameRef = useRef<number>(0);
 
-  // Fix #5: scena inicjalizowana TYLKO RAZ na mount — zależność []
+  // Fix #5: scena Three.js inicjalizowana TYLKO RAZ — zależność []
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
@@ -34,24 +32,17 @@ export default function Viewer3D({ project }: Viewer3DProps) {
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color('#0f0f1a');
-    sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 1000);
     camera.position.set(0, 0, 2.5);
-    cameraRef.current = camera;
 
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-    scene.add(ambientLight);
-
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
-    directionalLight.position.set(5, 5, 5);
-    scene.add(directionalLight);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    dirLight.position.set(5, 5, 5);
+    scene.add(dirLight);
 
     const geometry = new THREE.SphereGeometry(1, 64, 64);
-    const material = new THREE.MeshStandardMaterial({
-      roughness: 0.4,
-      metalness: 0.1,
-    });
+    const material = new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.1 });
     const sphereMesh = new THREE.Mesh(geometry, material);
     scene.add(sphereMesh);
     sphereMeshRef.current = sphereMesh;
@@ -62,16 +53,14 @@ export default function Viewer3D({ project }: Viewer3DProps) {
     controls.minDistance = 1.5;
     controls.maxDistance = 6;
 
-    const handleResize = () => {
+    const resizeObserver = new ResizeObserver(() => {
       const w = mount.clientWidth;
       const h = mount.clientHeight;
       if (w === 0 || h === 0) return;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
-    };
-
-    const resizeObserver = new ResizeObserver(handleResize);
+    });
     resizeObserver.observe(mount);
 
     const animate = () => {
@@ -88,12 +77,8 @@ export default function Viewer3D({ project }: Viewer3DProps) {
       renderer.dispose();
       geometry.dispose();
       material.dispose();
-      if (mount.contains(renderer.domElement)) {
-        mount.removeChild(renderer.domElement);
-      }
+      if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
       rendererRef.current = null;
-      sceneRef.current = null;
-      cameraRef.current = null;
       sphereMeshRef.current = null;
       textureRef.current = null;
     };
@@ -101,7 +86,7 @@ export default function Viewer3D({ project }: Viewer3DProps) {
   }, []);
 
   // Fix #5: aktualizacja TYLKO tekstury przy zmianie projektu —
-  // scena, geometria, materiał i renderer nie są odtwarzane
+  // renderer, geometria i materiał nie są odtwarzane
   useEffect(() => {
     const sphereMesh = sphereMeshRef.current;
     if (!sphereMesh) return;
