@@ -1,6 +1,5 @@
 typescript
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
-import { produce } from 'immer';
 import { v4 as uuidv4 } from 'uuid';
 import type {
   Project,
@@ -10,12 +9,12 @@ import type {
   SymmetryConfig,
 } from '@/shared/types';
 import {
-  DEFAULT_PALETTE,
   FORMAT_VERSION,
   SCHEMA_VERSION,
+  ORNAMENT_PRESETS,
+  createDefaultPalette,
 } from '@/shared/constants';
 import { generateOrnamentSegments } from '@/shared/utils/geometry';
-import { ORNAMENT_PRESETS } from '@/shared/constants';
 
 interface ProjectsState {
   projects: Project[];
@@ -27,18 +26,22 @@ const initialState: ProjectsState = {
   activeProjectId: null,
 };
 
-function createNewProject(
-  name: string,
-  spec: OrnamentSpec
-): Project {
+/** Obcina i ogranicza długość nazwy projektu. */
+function sanitizeProjectName(name: string): string {
+  const trimmed = name.trim().slice(0, 200);
+  return trimmed || 'Bez nazwy';
+}
+
+function createNewProject(name: string, spec: OrnamentSpec): Project {
   const segments = generateOrnamentSegments(spec);
   return {
     version: FORMAT_VERSION,
     schemaVersion: SCHEMA_VERSION,
     projectId: uuidv4(),
-    name,
+    name: sanitizeProjectName(name),
     ornamentSpec: spec,
-    palette: { colors: DEFAULT_PALETTE },
+    // Świeża kopia palety – brak współdzielonej referencji między projektami
+    palette: { colors: createDefaultPalette() },
     segments,
     patternMap: {},
     symmetry: {
@@ -54,6 +57,7 @@ function createNewProject(
   };
 }
 
+// RTK używa Immer wewnętrznie – mutacje state w reducerach są bezpieczne.
 const projectSlice = createSlice({
   name: 'projects',
   initialState,
@@ -80,7 +84,7 @@ const projectSlice = createSlice({
       state.activeProjectId = project.projectId;
     },
 
-    setActiveProject: (state, action: PayloadAction<string>) => {
+    setActiveProject: (state, action: PayloadAction<string | null>) => {
       state.activeProjectId = action.payload;
     },
 
@@ -93,16 +97,24 @@ const projectSlice = createSlice({
       }
     },
 
+    /**
+     * Import projektu. Obiekt MUSI być wcześniej zwalidowany przez
+     * validateProjectJSON (Zod) w warstwie wywołującej (Dashboard).
+     */
     importProject: (state, action: PayloadAction<Project>) => {
+      const incoming: Project = {
+        ...action.payload,
+        name: sanitizeProjectName(action.payload.name),
+      };
       const existing = state.projects.findIndex(
-        (p) => p.projectId === action.payload.projectId
+        (p) => p.projectId === incoming.projectId
       );
       if (existing >= 0) {
-        state.projects[existing] = action.payload;
+        state.projects[existing] = incoming;
       } else {
-        state.projects.push(action.payload);
+        state.projects.push(incoming);
       }
-      state.activeProjectId = action.payload.projectId;
+      state.activeProjectId = incoming.projectId;
     },
 
     updatePatternMap: (
@@ -164,7 +176,7 @@ const projectSlice = createSlice({
         (p) => p.projectId === action.payload.projectId
       );
       if (project) {
-        project.name = action.payload.name;
+        project.name = sanitizeProjectName(action.payload.name);
         project.metadata.updatedAt = new Date().toISOString();
       }
     },
