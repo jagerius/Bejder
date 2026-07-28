@@ -1,234 +1,169 @@
 tsx
-import React, { useRef, useEffect, useMemo, useCallback } from 'react';
+import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
-import { useAppSelector, useAppDispatch } from '@/app/store';
-import { setSelectedSegment } from '@/app/store/editorSlice';
 import { ProjectionEngine } from '@/domain/projection/ProjectionEngine';
+import type { Project } from '@/shared/types';
 
 interface Viewer3DProps {
-  projectId: string;
-  fullscreen?: boolean;
+  project: Project;
 }
 
-export default function Viewer3D({ projectId, fullscreen }: Viewer3DProps) {
-  const mountRef = useRef<HTMLDivElement>(null);
-  const sceneRef = useRef<{
-    renderer: THREE.WebGLRenderer;
-    scene: THREE.Scene;
-    camera: THREE.PerspectiveCamera;
-    sphere: THREE.Mesh;
-    animId: number;
-    isDragging: boolean;
-    lastMouse: { x: number; y: number };
-    rotX: number;
-    rotY: number;
-  } | null>(null);
-
-  const dispatch = useAppDispatch();
-  const project = useAppSelector((state) =>
-    state.projects.projects.find((p) => p.projectId === projectId)
-  );
-
-  const textureCanvas = useMemo(() => {
-    if (!project) return null;
-    const engine = new ProjectionEngine(project);
-    return engine.generateTexture(1024);
-  }, [project?.patternMap, project?.ornamentSpec, project?.palette]);
+export default function Viewer3D({ project }: Viewer3DProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (!mountRef.current || !project) return;
+    const container = containerRef.current;
+    if (!container) return;
 
-    const mount = mountRef.current;
-    const w = mount.clientWidth || 300;
-    const h = mount.clientHeight || 300;
-
-    // Renderer
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setSize(w, h);
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.setClearColor(0x12122a, 1);
-    mount.appendChild(renderer.domElement);
-
-    // Scene
     const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#11111f');
 
-    // Camera
-    const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100);
-    camera.position.set(0, 0, 3);
+    const camera = new THREE.PerspectiveCamera(
+      45,
+      container.clientWidth / Math.max(container.clientHeight, 1),
+      0.1,
+      100
+    );
+    camera.position.set(0, 0.4, 2.2);
 
-    // Lighting
-    const ambient = new THREE.AmbientLight(0xffffff, 0.6);
-    scene.add(ambient);
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    dirLight.position.set(5, 5, 5);
-    scene.add(dirLight);
-    const backLight = new THREE.DirectionalLight(0x8888ff, 0.3);
-    backLight.position.set(-3, -3, -3);
-    scene.add(backLight);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.appendChild(renderer.domElement);
 
-    // Sphere
-    const geometry = new THREE.SphereGeometry(1, 64, 32);
+    const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+    const directional = new THREE.DirectionalLight(0xffffff, 1.1);
+    directional.position.set(2, 3, 4);
+    scene.add(ambient, directional);
+
+    const engine = new ProjectionEngine(project);
+    const { textureCanvas } = engine.project2D();
+    const texture = new THREE.CanvasTexture(textureCanvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+
+    const radiusMm = project.ornamentSpec.diameterMm / 2;
+    const radius = Math.max(radiusMm / 50, 0.3);
+
+    // Referencje do zasobów GPU — wszystkie dispozowane w cleanup.
+    const geometry = new THREE.SphereGeometry(radius, 96, 64);
     const material = new THREE.MeshStandardMaterial({
-      roughness: 0.3,
-      metalness: 0.1,
+      map: texture,
+      roughness: 0.35,
+      metalness: 0.05,
     });
+    const ornament = new THREE.Mesh(geometry, material);
+    scene.add(ornament);
 
-    if (textureCanvas) {
-      const texture = new THREE.CanvasTexture(textureCanvas);
-      texture.needsUpdate = true;
-      material.map = texture;
-    }
-
-    const sphere = new THREE.Mesh(geometry, material);
-    scene.add(sphere);
-
-    // Cap
-    const capGeometry = new THREE.CylinderGeometry(0.05, 0.05, 0.15, 8);
-    const capMaterial = new THREE.MeshStandardMaterial({
-      color: 0xc0a000,
-      metalness: 0.8,
-      roughness: 0.2,
-    });
-    const cap = new THREE.Mesh(capGeometry, capMaterial);
-    cap.position.set(0, 1.1, 0);
-    scene.add(cap);
-
-    // Wire hook
-    const hookCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(0, 1.18, 0),
-      new THREE.Vector3(0.1, 1.3, 0),
-      new THREE.Vector3(0.15, 1.4, 0),
-    ]);
-    const hookGeo = new THREE.TubeGeometry(hookCurve, 10, 0.01, 6, false);
-    const hookMat = new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 0.9, roughness: 0.1 });
-    const hook = new THREE.Mesh(hookGeo, hookMat);
-    scene.add(hook);
-
+    const rotation = { x: 0, y: 0 };
+    const target = { x: 0.4, y: 0.6 };
     let isDragging = false;
-    let lastMouse = { x: 0, y: 0 };
-    let rotX = 0;
-    let rotY = 0;
+    let lastX = 0;
+    let lastY = 0;
+    let lastTouchDistance: number | null = null;
+    let animationFrameId = 0;
 
-    const onMouseDown = (e: MouseEvent) => {
+    const handlePointerDown = (event: PointerEvent) => {
       isDragging = true;
-      lastMouse = { x: e.clientX, y: e.clientY };
+      lastX = event.clientX;
+      lastY = event.clientY;
     };
-    const onMouseMove = (e: MouseEvent) => {
+    const handlePointerMove = (event: PointerEvent) => {
       if (!isDragging) return;
-      const dx = e.clientX - lastMouse.x;
-      const dy = e.clientY - lastMouse.y;
-      rotY += dx * 0.01;
-      rotX += dy * 0.01;
-      rotX = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, rotX));
-      sphere.rotation.y = rotY;
-      sphere.rotation.x = rotX;
-      lastMouse = { x: e.clientX, y: e.clientY };
+      target.y += (event.clientX - lastX) * 0.005;
+      target.x += (event.clientY - lastY) * 0.005;
+      lastX = event.clientX;
+      lastY = event.clientY;
     };
-    const onMouseUp = () => { isDragging = false; };
-    const onWheel = (e: WheelEvent) => {
-      camera.position.z = Math.max(1.5, Math.min(6, camera.position.z + e.deltaY * 0.005));
+    const handlePointerUp = () => {
+      isDragging = false;
+    };
+    const handleWheel = (event: WheelEvent) => {
+      camera.position.z = Math.min(
+        5,
+        Math.max(0.8, camera.position.z + event.deltaY * 0.001)
+      );
     };
 
-    renderer.domElement.addEventListener('mousedown', onMouseDown);
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-    renderer.domElement.addEventListener('wheel', onWheel, { passive: true });
-
-    // Touch support
-    let lastTouchDist = 0;
-    renderer.domElement.addEventListener('touchstart', (e) => {
-      if (e.touches.length === 1) {
-        isDragging = true;
-        lastMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-      } else if (e.touches.length === 2) {
-        const dx = e.touches[0].clientX - e.touches[1].clientX;
-        const dy = e.touches[0].clientY - e.touches[1].clientY;
-        lastTouchDist = Math.sqrt(dx * dx + dy * dy);
+    const handleTouchStart = (event: TouchEvent) => {
+      if (event.touches.length === 2) {
+        const [a, b] = [event.touches[0], event.touches[1]];
+        if (!a || !b) return;
+        lastTouchDistance = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
       }
-    });
-    renderer.domElement.addEventListener('touchmove', (e) => {
-      if (e.touches.length === 1 && isDragging) {
-        const dx = e.touches[0].clientX - lastMouse.x;
-        const dy = e.touches[0].clientY - lastMouse.y;
-        rotY += dx * 0.01;
-        rotX += dy * 0.01;
-        sphere.rotation.y = rotY;
-        sphere.rotation.x = rotX;
-        lastMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-      } else if (e.touches.length === 2) {
-        const dx = e.touches[0].clientX - e.touches[1].clientX;
-        const dy = e.touches[0].clientY - e.touches[1].clientY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        camera.position.z = Math.max(1.5, Math.min(6, camera.position.z + (lastTouchDist - dist) * 0.01));
-        lastTouchDist = dist;
+    };
+    const handleTouchMove = (event: TouchEvent) => {
+      if (event.touches.length === 2 && lastTouchDistance !== null) {
+        const [a, b] = [event.touches[0], event.touches[1]];
+        if (!a || !b) return;
+        const distance = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+        camera.position.z = Math.min(
+          5,
+          Math.max(0.8, camera.position.z - (distance - lastTouchDistance) * 0.005)
+        );
+        lastTouchDistance = distance;
+        event.preventDefault();
       }
-    });
-    renderer.domElement.addEventListener('touchend', () => { isDragging = false; });
+    };
+    const handleTouchEnd = () => {
+      lastTouchDistance = null;
+    };
 
-    // Animate
-    let animId = 0;
-    function animate() {
-      animId = requestAnimationFrame(animate);
+    const handleResize = () => {
+      const width = container.clientWidth;
+      const height = Math.max(container.clientHeight, 1);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      renderer.setSize(width, height);
+    };
+
+    const element = renderer.domElement;
+    element.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    element.addEventListener('wheel', handleWheel, { passive: true });
+    element.addEventListener('touchstart', handleTouchStart, { passive: true });
+    element.addEventListener('touchmove', handleTouchMove, { passive: false });
+    element.addEventListener('touchend', handleTouchEnd);
+    window.addEventListener('resize', handleResize);
+
+    const animate = () => {
+      rotation.x += (target.x - rotation.x) * 0.08;
+      rotation.y += (target.y - rotation.y) * 0.08;
+      ornament.rotation.set(rotation.x, rotation.y, 0);
       renderer.render(scene, camera);
-    }
+      animationFrameId = window.requestAnimationFrame(animate);
+    };
     animate();
 
-    // Resize
-    const resizeObserver = new ResizeObserver(() => {
-      const nw = mount.clientWidth;
-      const nh = mount.clientHeight;
-      camera.aspect = nw / nh;
-      camera.updateProjectionMatrix();
-      renderer.setSize(nw, nh);
-    });
-    resizeObserver.observe(mount);
-
-    sceneRef.current = {
-      renderer,
-      scene,
-      camera,
-      sphere,
-      animId,
-      isDragging,
-      lastMouse,
-      rotX,
-      rotY,
-    };
-
     return () => {
-      cancelAnimationFrame(animId);
-      renderer.domElement.removeEventListener('mousedown', onMouseDown);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-      resizeObserver.disconnect();
+      window.cancelAnimationFrame(animationFrameId);
+
+      // Pełny cleanup wszystkich listenerów — w tym touch.
+      element.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      element.removeEventListener('wheel', handleWheel);
+      element.removeEventListener('touchstart', handleTouchStart);
+      element.removeEventListener('touchmove', handleTouchMove);
+      element.removeEventListener('touchend', handleTouchEnd);
+      window.removeEventListener('resize', handleResize);
+
+      // Dispozycja zasobów GPU — geometria, materiał, tekstura, renderer.
+      scene.remove(ornament);
+      geometry.dispose();
+      material.dispose();
+      texture.dispose();
       renderer.dispose();
-      if (mount.contains(renderer.domElement)) {
-        mount.removeChild(renderer.domElement);
+
+      if (element.parentElement === container) {
+        container.removeChild(element);
       }
     };
-  }, []);
-
-  // Update texture when project changes
-  useEffect(() => {
-    if (!sceneRef.current || !textureCanvas) return;
-    const { sphere } = sceneRef.current;
-    const material = sphere.material as THREE.MeshStandardMaterial;
-
-    if (material.map) {
-      (material.map as THREE.CanvasTexture).dispose();
-    }
-    const texture = new THREE.CanvasTexture(textureCanvas);
-    texture.needsUpdate = true;
-    material.map = texture;
-    material.needsUpdate = true;
-  }, [textureCanvas]);
+  }, [project]);
 
   return (
-    <div className={`relative bg-[#12122a] ${fullscreen ? 'h-full' : 'h-full'}`}>
-      <div ref={mountRef} className="w-full h-full" />
-      <div className="absolute top-2 left-2 text-xs text-gray-500 pointer-events-none">
-        🖱 Obróć • Scroll: zoom
-      </div>
-    </div>
+    <section aria-label="Podgląd 3D ornamentu" className="viewer3d">
+      <div ref={containerRef} className="viewer3d__canvas" />
+    </section>
   );
 }

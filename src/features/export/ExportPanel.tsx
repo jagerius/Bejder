@@ -1,228 +1,223 @@
 tsx
-import React, { useRef } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { jsPDF } from 'jspdf';
 import { useAppSelector } from '@/app/store';
-import { exportProjectToJSON } from '@/shared/utils/persistence';
 import { ProjectionEngine } from '@/domain/projection/ProjectionEngine';
-import { countBeadsByColor } from '@/shared/utils/geometry';
-import jsPDF from 'jspdf';
+import type { Project } from '@/shared/types';
 
 interface ExportPanelProps {
-  projectId: string;
+  project: Project;
 }
 
-export default function ExportPanel({ projectId }: ExportPanelProps) {
-  const project = useAppSelector((state) =>
-    state.projects.projects.find((p) => p.projectId === projectId)
+interface RgbColor {
+  r: number;
+  g: number;
+  b: number;
+}
+
+interface BomEntry {
+  colorId: string;
+  name: string;
+  hex: string;
+  rgb: RgbColor;
+  count: number;
+}
+
+const HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+const PAGE_WIDTH_MM = 297;
+const PAGE_HEIGHT_MM = 210;
+const MARGIN_MM = 14;
+const LINE_HEIGHT_MM = 8;
+
+function hexToRgb(hex: string): RgbColor | null {
+  if (!HEX_PATTERN.test(hex)) {
+    return null;
+  }
+
+  let normalized = hex.slice(1);
+  if (normalized.length === 3) {
+    normalized = normalized
+      .split('')
+      .map((char) => char + char)
+      .join('');
+  } else if (normalized.length === 8) {
+    normalized = normalized.slice(0, 6);
+  }
+
+  const r = Number.parseInt(normalized.slice(0, 2), 16);
+  const g = Number.parseInt(normalized.slice(2, 4), 16);
+  const b = Number.parseInt(normalized.slice(4, 6), 16);
+
+  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) {
+    return null;
+  }
+  return { r, g, b };
+}
+
+// Zapewnia miejsce na kolejną linię; w razie potrzeby dodaje nową stronę PDF.
+// Chroni przed przepełnieniem strony we wszystkich sekcjach listowych (BOM, rzędy itp.).
+function ensureLineSpace(pdf: jsPDF, cursorY: number, title?: string): number {
+  if (cursorY + LINE_HEIGHT_MM <= PAGE_HEIGHT_MM - MARGIN_MM) {
+    return cursorY;
+  }
+  pdf.addPage('a4', 'landscape');
+  if (title) {
+    pdf.setFontSize(12);
+    pdf.text(title, MARGIN_MM, MARGIN_MM + 2);
+    return MARGIN_MM + LINE_HEIGHT_MM + 4;
+  }
+  return MARGIN_MM;
+}
+
+export default function ExportPanel({ project }: ExportPanelProps) {
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const activeProjectId = useAppSelector((state) => state.projects.activeProjectId);
+
+  const paletteWithRgb = useMemo(
+    () =>
+      project.palette.colors.map((color) => ({
+        ...color,
+        rgb: hexToRgb(color.hex),
+      })),
+    [project.palette.colors]
   );
 
-  if (!project) return null;
+  const invalidColors = useMemo(
+    () => paletteWithRgb.filter((color) => color.rgb === null),
+    [paletteWithRgb]
+  );
 
-  function handleExportJSON() {
-    exportProjectToJSON(project!);
-  }
-
-  function handleExportPNG() {
-    if (!project) return;
-    const engine = new ProjectionEngine(project);
-    const canvas = engine.generateTexture(2048);
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${project!.name.replace(/\s+/g, '_')}_wzor.png`;
-      a.click();
-      URL.revokeObjectURL(url);
-    });
-  }
-
-  function handleExportCSV() {
-    if (!project) return;
-    const counts = countBeadsByColor(project.segments, project.patternMap);
-    const rows = ['Kolor,Hex,Kod materiału,Ilość'];
-    for (const color of project.palette.colors) {
-      const count = counts[color.id] ?? 0;
-      rows.push(`"${color.name}","${color.hex}","${color.materialCode ?? ''}",${count}`);
+  // Lista materiałów (BOM) — liczba koralików per kolor.
+  const bomEntries = useMemo<BomEntry[]>(() => {
+    const counts = new Map<string, number>();
+    for (const colorId of Object.values(project.patternMap)) {
+      counts.set(colorId, (counts.get(colorId) ?? 0) + 1);
     }
-    const total = Object.values(counts).reduce((a, b) => a + b, 0);
-    rows.push(`"RAZEM","","",${total}`);
-    const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${project.name.replace(/\s+/g, '_')}_materialy.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
+    return paletteWithRgb
+      .filter((color): color is typeof color & { rgb: RgbColor } => color.rgb !== null)
+      .map((color) => ({
+        colorId: color.id,
+        name: color.name,
+        hex: color.hex,
+        rgb: color.rgb,
+        count: counts.get(color.id) ?? 0,
+      }));
+  }, [paletteWithRgb, project.patternMap]);
 
-  function handleExportPDF() {
-    if (!project) return;
-    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-    const counts = countBeadsByColor(project.segments, project.patternMap);
-    const total = Object.values(counts).reduce((a, b) => a + b, 0);
-
-    // Title
-    doc.setFontSize(20);
-    doc.setTextColor(40, 40, 80);
-    doc.text('Instrukcja wykonania bombki', 20, 20);
-
-    doc.setFontSize(12);
-    doc.setTextColor(60, 60, 60);
-    doc.text(`Projekt: ${project.name}`, 20, 32);
-    doc.text(`Średnica: ${project.ornamentSpec.diameterMm}mm`, 20, 40);
-    doc.text(`Segmenty: ${project.ornamentSpec.segmentCount}`, 20, 48);
-    doc.text(`Rzędy na segment: ${project.ornamentSpec.segmentRows}`, 20, 56);
-    doc.text(`Data: ${new Date(project.metadata.createdAt).toLocaleDateString('pl')}`, 20, 64);
-
-    // Separator
-    doc.setDrawColor(200, 200, 200);
-    doc.line(20, 70, 190, 70);
-
-    // BOM Table
-    doc.setFontSize(14);
-    doc.setTextColor(40, 40, 80);
-    doc.text('Lista materiałów', 20, 80);
-
-    doc.setFontSize(10);
-    doc.setTextColor(80, 80, 80);
-    doc.text('Kolor', 20, 90);
-    doc.text('Kod', 80, 90);
-    doc.text('Ilość', 140, 90);
-    doc.text('%', 165, 90);
-    doc.line(20, 92, 190, 92);
-
-    let y = 98;
-    for (const color of project.palette.colors) {
-      const count = counts[color.id] ?? 0;
-      const pct = total > 0 ? ((count / total) * 100).toFixed(1) : '0.0';
-
-      // Color swatch
-      const rgb = hexToRgb(color.hex);
-      doc.setFillColor(rgb.r, rgb.g, rgb.b);
-      doc.circle(22, y - 1, 2.5, 'F');
-
-      doc.setTextColor(40, 40, 40);
-      doc.text(color.name, 28, y);
-      doc.text(color.materialCode ?? '—', 80, y);
-      doc.text(String(count), 140, y);
-      doc.text(`${pct}%`, 165, y);
-      y += 7;
+  const handleExportPdf = useCallback(() => {
+    if (activeProjectId !== project.projectId) {
+      setExportError('Projekt nie jest aktywny.');
+      return;
+    }
+    if (invalidColors.length > 0) {
+      setExportError(
+        `Nieprawidłowy format koloru HEX: ${invalidColors
+          .map((color) => `${color.name} (${color.hex})`)
+          .join(', ')}`
+      );
+      return;
     }
 
-    doc.setFontSize(11);
-    doc.setTextColor(200, 50, 50);
-    doc.text(`Razem: ${total} koralików`, 20, y + 4);
+    setIsExporting(true);
+    setExportError(null);
 
-    // Row instructions
-    y += 16;
-    doc.setFontSize(14);
-    doc.setTextColor(40, 40, 80);
-    doc.text('Sekwencja rzędów (segment 1)', 20, y);
-    y += 8;
+    try {
+      const engine = new ProjectionEngine(project);
+      const result = engine.project2D();
 
-    doc.setFontSize(9);
-    doc.setTextColor(60, 60, 60);
-    const seg0 = project.segments[0];
-    if (seg0) {
-      for (let row = 0; row < seg0.rows; row++) {
-        const cells = seg0.cells.filter((c) => c.row === row);
-        const colorSeq = cells
-          .map((c) => {
-            const cId = project.patternMap[c.id] ?? null;
-            const col = project.palette.colors.find((pc) => pc.id === cId);
-            return col ? col.name : '—';
-          })
-          .join(', ');
-        doc.text(`Rząd ${row + 1} (${cells.length} kor.): ${colorSeq}`, 20, y);
-        y += 5;
-        if (y > 270) {
-          doc.addPage();
-          y = 20;
-        }
+      const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+      pdf.setFontSize(16);
+      pdf.text(project.name, MARGIN_MM, 16);
+      pdf.setFontSize(10);
+      pdf.text(
+        `Średnica: ${project.ornamentSpec.diameterMm} mm · Segmenty: ${project.ornamentSpec.segmentCount} · Rzędy: ${project.ornamentSpec.segmentRows}`,
+        MARGIN_MM,
+        24
+      );
+
+      const image = result.textureCanvas.toDataURL('image/png');
+      pdf.addImage(image, 'PNG', MARGIN_MM, 32, PAGE_WIDTH_MM - 2 * MARGIN_MM, 134.5);
+
+      // Sekcja BOM z ochroną przed przepełnieniem strony.
+      let cursorY = ensureLineSpace(pdf, 176, 'Lista materiałów (BOM)');
+      pdf.setFontSize(12);
+      pdf.text('Lista materiałów (BOM)', MARGIN_MM, cursorY);
+      cursorY += LINE_HEIGHT_MM;
+
+      pdf.setFontSize(10);
+      for (const entry of bomEntries) {
+        cursorY = ensureLineSpace(pdf, cursorY, 'Lista materiałów (BOM) — cd.');
+        pdf.setFillColor(entry.rgb.r, entry.rgb.g, entry.rgb.b);
+        pdf.rect(MARGIN_MM, cursorY - 4, 6, 6, 'F');
+        pdf.setTextColor(30, 30, 30);
+        pdf.text(`${entry.name} (${entry.hex}) — ${entry.count} szt.`, MARGIN_MM + 10, cursorY);
+        cursorY += LINE_HEIGHT_MM;
       }
+
+      // Sekcja rzędów — również z ochroną przed przepełnieniem strony.
+      cursorY = ensureLineSpace(pdf, cursorY + LINE_HEIGHT_MM, 'Schemat rzędów');
+      pdf.setFontSize(12);
+      pdf.text('Schemat rzędów', MARGIN_MM, cursorY);
+      cursorY += LINE_HEIGHT_MM;
+
+      pdf.setFontSize(10);
+      for (let row = 0; row < project.ornamentSpec.segmentRows; row++) {
+        cursorY = ensureLineSpace(pdf, cursorY, 'Schemat rzędów — cd.');
+        pdf.text(
+          `Rząd ${row + 1}: ${row + 1} kolumn(y) w segmencie`,
+          MARGIN_MM,
+          cursorY
+        );
+        cursorY += LINE_HEIGHT_MM;
+      }
+
+      pdf.save(`${project.name}.pdf`);
+    } catch {
+      setExportError('Eksport PDF nie powiódł się.');
+    } finally {
+      setIsExporting(false);
     }
-
-    doc.save(`${project.name.replace(/\s+/g, '_')}_instrukcja.pdf`);
-  }
-
-  function hexToRgb(hex: string) {
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    return { r, g, b };
-  }
-
-  const exportOptions = [
-    {
-      icon: '📄',
-      label: 'JSON projektu',
-      desc: 'Pełny plik projektu do ponownego importu',
-      action: handleExportJSON,
-      color: 'bg-blue-900/40 hover:bg-blue-800/40',
-    },
-    {
-      icon: '🖼',
-      label: 'PNG wzoru',
-      desc: 'Grafika tekstury rozwinięcia wzoru (2048px)',
-      action: handleExportPNG,
-      color: 'bg-green-900/40 hover:bg-green-800/40',
-    },
-    {
-      icon: '📊',
-      label: 'CSV materiałów',
-      desc: 'Lista koralików per kolor z ilościami',
-      action: handleExportCSV,
-      color: 'bg-yellow-900/40 hover:bg-yellow-800/40',
-    },
-    {
-      icon: '📋',
-      label: 'PDF instrukcji',
-      desc: 'Kompletna instrukcja montażu z BOM i rzędami',
-      action: handleExportPDF,
-      color: 'bg-red-900/40 hover:bg-red-800/40',
-    },
-  ];
+  }, [activeProjectId, bomEntries, invalidColors, project]);
 
   return (
-    <div className="p-6 max-w-xl mx-auto">
-      <h2 className="text-xl font-bold mb-2">📤 Eksport projektu</h2>
-      <p className="text-gray-400 text-sm mb-6">
-        Eksportuj projekt w wybranym formacie.
-      </p>
+    <section aria-label="Panel eksportu" className="export-panel">
+      <h2>Eksport</h2>
 
-      <div className="space-y-3">
-        {exportOptions.map((opt) => (
-          <button
-            key={opt.label}
-            onClick={opt.action}
-            className={`w-full flex items-center gap-4 p-4 rounded-xl text-left transition ${opt.color}`}
-          >
-            <span className="text-3xl">{opt.icon}</span>
-            <div>
-              <div className="font-semibold text-white">{opt.label}</div>
-              <div className="text-xs text-gray-400 mt-0.5">{opt.desc}</div>
-            </div>
-            <span className="ml-auto text-gray-500">↓</span>
-          </button>
+      <ul className="export-panel__palette">
+        {bomEntries.map((entry) => (
+          <li key={entry.colorId}>
+            <span
+              className="export-panel__swatch"
+              style={{ backgroundColor: entry.hex }}
+              aria-hidden="true"
+            />
+            <span>{entry.name}</span>
+            <code>{entry.hex}</code>
+            <span>{entry.count} szt.</span>
+          </li>
         ))}
-      </div>
+      </ul>
 
-      <div className="mt-8 bg-[#16213e] rounded-xl p-4 text-sm text-gray-400">
-        <div className="font-semibold text-white mb-2">Podsumowanie projektu</div>
-        <div className="space-y-1">
-          <div>Nazwa: <span className="text-white">{project.name}</span></div>
-          <div>Średnica: <span className="text-white">{project.ornamentSpec.diameterMm}mm</span></div>
-          <div>Segmenty: <span className="text-white">{project.ornamentSpec.segmentCount}</span></div>
-          <div>Kolory: <span className="text-white">{project.palette.colors.length}</span></div>
-          <div>Autor: <span className="text-white">{project.metadata.author}</span></div>
-          <div>
-            Utworzono:{' '}
-            <span className="text-white">
-              {new Date(project.metadata.createdAt).toLocaleString('pl')}
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
+      {invalidColors.length > 0 ? (
+        <ul className="export-panel__invalid-list">
+          {invalidColors.map((color) => (
+            <li key={color.id} role="alert">
+              {color.name} ({color.hex}) — nieprawidłowy HEX
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      <button type="button" onClick={handleExportPdf} disabled={isExporting}>
+        {isExporting ? 'Eksportowanie…' : 'Eksportuj do PDF'}
+      </button>
+
+      {exportError ? (
+        <p role="alert" className="export-panel__error">
+          {exportError}
+        </p>
+      ) : null}
+    </section>
   );
 }

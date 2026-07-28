@@ -1,61 +1,13 @@
 typescript
-import type { BeadCell, OrnamentSpec, SegmentTemplate } from '../types';
-import { v4 as uuidv4 } from 'uuid';
+import type {
+  BeadCell,
+  OrnamentSpec,
+  PatternMap,
+  Project,
+  Segment,
+} from '@/shared/types';
 
-/**
- * Generuje siatkę komórek dla segmentu trójkątnego.
- * Rząd 0 = wierzchołek (1 koralik), kolejne rzędy rosną.
- */
-export function generateTriangularSegment(
-  segmentId: string,
-  rows: number
-): SegmentTemplate {
-  const cells: BeadCell[] = [];
-
-  for (let row = 0; row < rows; row++) {
-    const colsInRow = row + 1;
-    for (let col = 0; col < colsInRow; col++) {
-      const localU = colsInRow > 1 ? col / (colsInRow - 1) : 0.5;
-      const localV = row / (rows - 1);
-      cells.push({
-        id: `${segmentId}_r${row}_c${col}`,
-        row,
-        col,
-        localU,
-        localV,
-        color: null,
-      });
-    }
-  }
-
-  return {
-    id: segmentId,
-    rows,
-    cells,
-    edgeRules: {
-      leftJoin: true,
-      rightJoin: true,
-      topJoin: false,
-    },
-  };
-}
-
-export function generateOrnamentSegments(spec: OrnamentSpec): SegmentTemplate[] {
-  const segments: SegmentTemplate[] = [];
-  for (let i = 0; i < spec.segmentCount; i++) {
-    const segId = `seg_${i}`;
-    segments.push(generateTriangularSegment(segId, spec.segmentRows));
-  }
-  return segments;
-}
-
-/**
- * Mapuje komórkę segmentu na współrzędne UV sfery.
- * segmentIndex: indeks segmentu (0..segmentCount-1)
- * rows: całkowita liczba rzędów
- * row, col: pozycja w siatce
- * segmentCount: liczba segmentów
- */
+/** UV komórki na mapie sferycznej (mercator). */
 export function cellToSphereUV(
   segmentIndex: number,
   segmentCount: number,
@@ -64,98 +16,139 @@ export function cellToSphereUV(
   col: number
 ): { u: number; v: number } {
   const colsInRow = row + 1;
-  const localU = colsInRow > 1 ? col / (colsInRow - 1) : 0.5;
-
-  // V: od bieguna do równika i z powrotem (0 = góra, 0.5 = równik, 1 = dół)
-  // Mapujemy rząd na połowę sfery: segment zajmuje ćwiartkę sfery
-  const v = 0.05 + (row / (rows - 1)) * 0.45;
-
-  // U: każdy segment zajmuje 1/segmentCount szerokości sfery
-  const segStart = segmentIndex / segmentCount;
-  const segEnd = (segmentIndex + 1) / segmentCount;
-  const u = segStart + localU * (segEnd - segStart);
-
+  const u =
+    (segmentIndex + (colsInRow > 1 ? col / (colsInRow - 1) : 0.5)) /
+    segmentCount;
+  const v = rows > 1 ? row / (rows - 1) : 0.5;
   return { u, v };
 }
 
-export function floodFill(
-  cells: BeadCell[],
-  startCellId: string,
-  targetColor: string | null,
-  newColor: string | null,
-  patternMap: Record<string, string | null>
-): string[] {
-  if (targetColor === newColor) return [];
-
-  const cellMap = new Map(cells.map((c) => [c.id, c]));
-  const visited = new Set<string>();
-  const toFill: string[] = [];
-  const queue = [startCellId];
-
-  while (queue.length > 0) {
-    const id = queue.pop()!;
-    if (visited.has(id)) continue;
-    visited.add(id);
-
-    const cell = cellMap.get(id);
-    if (!cell) continue;
-    if ((patternMap[id] ?? null) !== targetColor) continue;
-
-    toFill.push(id);
-
-    // Znajdź sąsiadów w tej samej siatce
-    const neighbors = cells.filter((c) => {
-      if (c.id === id) return false;
-      const dr = Math.abs(c.row - cell.row);
-      const dc = Math.abs(c.col - cell.col);
-      return (dr === 0 && dc === 1) || (dr === 1 && dc <= 1);
-    });
-
-    for (const n of neighbors) {
-      if (!visited.has(n.id)) {
-        queue.push(n.id);
+/** Generuje segmenty z komórkami na podstawie specyfikacji ornamentu. */
+export function generateOrnamentSegments(spec: OrnamentSpec): Segment[] {
+  const segments: Segment[] = [];
+  for (let si = 0; si < spec.segmentCount; si++) {
+    const cells: BeadCell[] = [];
+    for (let row = 0; row < spec.segmentRows; row++) {
+      const colsInRow = row + 1;
+      for (let col = 0; col < colsInRow; col++) {
+        cells.push({ id: `s${si}-r${row}-c${col}`, row, col });
       }
+    }
+    segments.push({ id: `segment-${si}`, index: si, cells });
+  }
+  return segments;
+}
+
+/** Klucz komórki w lokalnej siatce segmentu. */
+export function cellKey(row: number, col: number): string {
+  return `${row}:${col}`;
+}
+
+/** Sąsiedzi komórki w siatce trójkątnej (w obrębie segmentu). */
+export function getCellNeighbors(
+  cell: BeadCell,
+  cellsByKey: Map<string, BeadCell>
+): BeadCell[] {
+  const candidates: Array<[number, number]> = [
+    [cell.row, cell.col - 1],
+    [cell.row, cell.col + 1],
+    [cell.row - 1, cell.col - 1],
+    [cell.row - 1, cell.col],
+    [cell.row + 1, cell.col],
+    [cell.row + 1, cell.col + 1],
+  ];
+
+  const neighbors: BeadCell[] = [];
+  for (const [row, col] of candidates) {
+    if (row < 0 || col < 0 || col > row) continue;
+    const neighbor = cellsByKey.get(cellKey(row, col));
+    if (neighbor) neighbors.push(neighbor);
+  }
+  return neighbors;
+}
+
+/**
+ * Flood fill — BFS (wskaźnik head zamiast kosztownego queue.shift()).
+ * Wszystkie lookupy przez Mapy O(1) — całkowita złożoność O(n),
+ * zamiast wcześniejszego O(n²) z cells.filter wewnątrz pętli.
+ */
+export function floodFill(
+  segment: Segment,
+  startCellId: string,
+  targetColorId: string | null,
+  replacementColorId: string,
+  patternMap: PatternMap
+): PatternMap {
+  const cellsById = new Map(segment.cells.map((cell) => [cell.id, cell]));
+  const cellsByKey = new Map(
+    segment.cells.map((cell) => [cellKey(cell.row, cell.col), cell])
+  );
+
+  const start = cellsById.get(startCellId);
+  if (!start) return patternMap;
+
+  const startColor = patternMap[startCellId] ?? targetColorId;
+  const replacement = replacementColorId;
+  if (startColor === replacement) return patternMap;
+
+  const next: PatternMap = { ...patternMap };
+  const visited = new Set<string>([startCellId]);
+  const queue: BeadCell[] = [start];
+  let head = 0;
+
+  while (head < queue.length) {
+    const cell = queue[head];
+    head += 1;
+    if (!cell) break;
+
+    next[cell.id] = replacement;
+
+    // Sąsiedzi przez Mapę O(1) — brak cells.filter.
+    for (const neighbor of getCellNeighbors(cell, cellsByKey)) {
+      if (visited.has(neighbor.id)) continue;
+      const neighborColor = next[neighbor.id] ?? targetColorId;
+      if (neighborColor !== startColor) continue;
+      visited.add(neighbor.id);
+      queue.push(neighbor);
     }
   }
 
-  return toFill;
+  return next;
 }
 
-export function applyRadialSymmetry(
-  segments: SegmentTemplate[],
-  sourceSegmentId: string,
-  patternMap: Record<string, string | null>
-): Record<string, string | null> {
-  const newMap = { ...patternMap };
-  const sourceSegment = segments.find((s) => s.id === sourceSegmentId);
-  if (!sourceSegment) return newMap;
+/**
+ * Kopiuje wzór z segmentu źródłowego na wszystkie pozostałe segmenty (symetria radialna).
+ * Lookup komórek przez Mapę z kluczem row:col — O(1) zamiast cells.find O(n),
+ * co redukuje całkowitą złożoność z O(n²) do O(n).
+ */
+export function applyRadialSymmetry(project: Project): PatternMap {
+  const { segments, symmetry, patternMap } = project;
+  const sourceSegment =
+    segments.find((segment) => segment.id === symmetry.sourceSegmentId) ??
+    segments[0];
+
+  if (!sourceSegment) return { ...patternMap };
+
+  // Indeks komórek źródłowych po współrzędnych — budowany raz, O(n).
+  const sourceByKey = new Map(
+    sourceSegment.cells.map((cell) => [cellKey(cell.row, cell.col), cell])
+  );
+
+  const next: PatternMap = { ...patternMap };
 
   for (const segment of segments) {
-    if (segment.id === sourceSegmentId) continue;
+    if (segment.id === sourceSegment.id) continue;
     for (const cell of segment.cells) {
-      const sourceCell = sourceSegment.cells.find(
-        (sc) => sc.row === cell.row && sc.col === cell.col
-      );
-      if (sourceCell) {
-        newMap[cell.id] = patternMap[sourceCell.id] ?? null;
+      const sourceCell = sourceByKey.get(cellKey(cell.row, cell.col));
+      if (!sourceCell) continue;
+      const sourceColor = patternMap[sourceCell.id];
+      if (sourceColor) {
+        next[cell.id] = sourceColor;
+      } else {
+        delete next[cell.id];
       }
     }
   }
-  return newMap;
-}
 
-export function countBeadsByColor(
-  segments: SegmentTemplate[],
-  patternMap: Record<string, string | null>
-): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const seg of segments) {
-    for (const cell of seg.cells) {
-      const color = patternMap[cell.id] ?? null;
-      if (color) {
-        counts[color] = (counts[color] || 0) + 1;
-      }
-    }
-  }
-  return counts;
+  return next;
 }

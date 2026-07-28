@@ -14,7 +14,7 @@ export class ProjectionEngine {
     this.project = project;
   }
 
-  project2D(proj: Project): SphericalProjectionResult {
+  project2D(): SphericalProjectionResult {
     const canvas = this.generateTexture(TEXTURE_RESOLUTION);
     const segmentUVMap = this.buildSegmentUVMap();
     return { textureCanvas: canvas, segmentUVMap };
@@ -24,9 +24,11 @@ export class ProjectionEngine {
     const canvas = document.createElement('canvas');
     canvas.width = resolution;
     canvas.height = resolution / 2;
-    const ctx = canvas.getContext('2d')!;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Nie można uzyskać kontekstu 2D dla canvas');
+    }
 
-    // Tło
     ctx.fillStyle = '#1a1a2e';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -34,6 +36,12 @@ export class ProjectionEngine {
     const colorMap = new Map(palette.colors.map((c) => [c.id, c.hex]));
     const segCount = ornamentSpec.segmentCount;
     const rows = ornamentSpec.segmentRows;
+
+    const beadHeight = (resolution / 2 / rows) * 0.5 * 0.85;
+    const beadWidthByRow = Array.from({ length: rows }, (_, row) => {
+      const colsInRow = row + 1;
+      return (resolution / segCount / colsInRow) * 0.85;
+    });
 
     for (let si = 0; si < segments.length; si++) {
       const segment = segments[si];
@@ -44,28 +52,24 @@ export class ProjectionEngine {
 
         const hex = colorMap.get(color) ?? '#888';
         const uv = cellToSphereUV(si, segCount, rows, cell.row, cell.col);
-
-        // Oblicz rozmiar "plamki" koralika na teksturze
-        const colsInRow = cell.row + 1;
-        const beadW = (resolution / segCount) / colsInRow * 0.85;
-        const beadH = (resolution / 2 / rows) * 0.5 * 0.85;
+        const beadW = beadWidthByRow[cell.row];
+        if (beadW === undefined) continue;
 
         const px = uv.u * resolution;
         const py = uv.v * (resolution / 2);
 
         ctx.fillStyle = hex;
         ctx.beginPath();
-        ctx.ellipse(px, py, beadW / 2, beadH / 2, 0, 0, Math.PI * 2);
+        ctx.ellipse(px, py, beadW / 2, beadHeight / 2, 0, 0, Math.PI * 2);
         ctx.fill();
 
-        // Highlight symulujący połysk koralika
         ctx.fillStyle = 'rgba(255,255,255,0.3)';
         ctx.beginPath();
         ctx.ellipse(
           px - beadW * 0.1,
-          py - beadH * 0.15,
+          py - beadHeight * 0.15,
           beadW * 0.2,
-          beadH * 0.2,
+          beadHeight * 0.2,
           0,
           0,
           Math.PI * 2

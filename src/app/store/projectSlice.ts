@@ -89,12 +89,16 @@ const projectSlice = createSlice({
     },
 
     deleteProject: (state, action: PayloadAction<string>) => {
+      // Najpierw sprawdź czy usuwany projekt jest aktywny, zanim zmodyfikujesz listę
+      if (state.activeProjectId === action.payload) {
+        const remaining = state.projects.filter(
+          (p) => p.projectId !== action.payload
+        );
+        state.activeProjectId = remaining[0]?.projectId ?? null;
+      }
       state.projects = state.projects.filter(
         (p) => p.projectId !== action.payload
       );
-      if (state.activeProjectId === action.payload) {
-        state.activeProjectId = state.projects[0]?.projectId ?? null;
-      }
     },
 
     /**

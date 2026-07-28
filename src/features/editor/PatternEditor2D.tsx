@@ -1,233 +1,226 @@
 tsx
-import React, {
-  useRef,
-  useCallback,
-  useEffect,
-  useState,
-  useMemo,
-} from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '@/app/store';
+import {
+  setEditorZoom,
+  setEditorPan,
+  pushHistory,
+} from '@/app/store/editorSlice';
 import { updatePatternMap } from '@/app/store/projectSlice';
-import { pushHistory } from '@/app/store/historySlice';
-import { setHoveredCell, setActiveColor } from '@/app/store/editorSlice';
-import { floodFill, applyRadialSymmetry } from '@/shared/utils/geometry';
-import type { PatternMap } from '@/shared/types';
+import type { BeadCell, PatternMap, Project, Segment } from '@/shared/types';
 
 interface PatternEditor2DProps {
-  projectId: string;
+  project: Project;
+}
+
+interface CellPosition {
+  x: number;
+  y: number;
+  size: number;
 }
 
 const CELL_SIZE = 28;
-const PADDING = 20;
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 4;
 
-export default function PatternEditor2D({ projectId }: PatternEditor2DProps) {
+function clampZoom(value: number): number {
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
+}
+
+export default function PatternEditor2D({ project }: PatternEditor2DProps) {
   const dispatch = useAppDispatch();
-  const project = useAppSelector((state) =>
-    state.projects.projects.find((p) => p.projectId === projectId)
+  // Źródłem prawdy dla zoom/pan jest editorSlice — brak lokalnego duplikatu stanu.
+  const zoom = useAppSelector((state) => state.editor.zoom);
+  const pan = useAppSelector((state) => state.editor.pan);
+  const selectedColorId = useAppSelector((state) => state.editor.selectedColorId);
+
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const isPaintingRef = useRef(false);
+  const isPanningRef = useRef(false);
+  const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
+  const [, setPointerVersion] = useState(0);
+
+  const colorMap = useMemo(
+    () => new Map(project.palette.colors.map((color) => [color.id, color.hex])),
+    [project.palette.colors]
   );
-  const { activeTool, activeColorId, selectedSegmentId } = useAppSelector(
-    (state) => state.editor
+
+  const layout = useMemo(() => {
+    const positions = new Map<string, CellPosition>();
+    const rowHeight = CELL_SIZE * 0.9;
+    let maxX = 0;
+    let maxY = 0;
+
+    project.segments.forEach((segment, segmentIndex) => {
+      const segmentOffsetX = segmentIndex * (project.ornamentSpec.segmentRows + 1) * CELL_SIZE;
+      for (const cell of segment.cells) {
+        const colsInRow = cell.row + 1;
+        const rowWidth = colsInRow * CELL_SIZE;
+        const x = segmentOffsetX + cell.col * CELL_SIZE + rowWidth / 2;
+        const y = cell.row * rowHeight + CELL_SIZE / 2;
+        positions.set(cell.id, { x, y, size: CELL_SIZE * 0.86 });
+        maxX = Math.max(maxX, x + CELL_SIZE);
+        maxY = Math.max(maxY, y + CELL_SIZE);
+      }
+    });
+
+    return { positions, width: maxX + CELL_SIZE, height: maxY + CELL_SIZE };
+  }, [project.segments, project.ornamentSpec.segmentRows]);
+
+  // Stabilne referencje dzięki useCallback — nie zmieniają się między renderami,
+  // o ile nie zmienią się ich zależności.
+  const getCellColor = useCallback(
+    (cell: BeadCell): string => {
+      const colorId = project.patternMap[cell.id];
+      if (!colorId) return '#2a2a3e';
+      return colorMap.get(colorId) ?? '#888888';
+    },
+    [project.patternMap, colorMap]
   );
 
-  const svgRef = useRef<SVGSVGElement>(null);
-  const [isPainting, setIsPainting] = useState(false);
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const lastPanRef = useRef({ x: 0, y: 0, startX: 0, startY: 0, active: false });
+  const getCellPosition = useCallback(
+    (cell: BeadCell): CellPosition | null => {
+      return layout.positions.get(cell.id) ?? null;
+    },
+    [layout.positions]
+  );
 
-  const activeSegment = useMemo(() => {
-    if (!project) return null;
-    if (selectedSegmentId) {
-      return project.segments.find((s) => s.id === selectedSegmentId) ?? project.segments[0];
-    }
-    return project.segments[0] ?? null;
-  }, [project, selectedSegmentId]);
+  const findCellAtPoint = useCallback(
+    (clientX: number, clientY: number): { segment: Segment; cell: BeadCell } | null => {
+      const canvas = canvasRef.current;
+      if (!canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const worldX = (clientX - rect.left - pan.x) / zoom;
+      const worldY = (clientY - rect.top - pan.y) / zoom;
 
-  const colorMap = useMemo(() => {
-    if (!project) return new Map<string, string>();
-    return new Map(project.palette.colors.map((c) => [c.id, c.hex]));
-  }, [project]);
+      for (const segment of project.segments) {
+        for (const cell of segment.cells) {
+          const position = getCellPosition(cell);
+          if (!position) continue;
+          const dx = worldX - position.x;
+          const dy = worldY - position.y;
+          const radius = position.size / 2;
+          if (dx * dx + dy * dy <= radius * radius) {
+            return { segment, cell };
+          }
+        }
+      }
+      return null;
+    },
+    [project.segments, getCellPosition, pan.x, pan.y, zoom]
+  );
 
-  const isSourceSegment = useMemo(() => {
-    if (!project || !activeSegment) return true;
-    return (
-      project.symmetry.mode !== 'radial' ||
-      project.symmetry.sourceSegmentId === activeSegment.id ||
-      !project.symmetry.sourceSegmentId
-    );
-  }, [project, activeSegment]);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-  function getCellColor(cellId: string): string {
-    if (!project) return '#333';
-    const colorRef = project.patternMap[cellId] ?? null;
-    if (!colorRef) return '#2a2a3e';
-    return colorMap.get(colorRef) ?? '#888';
-  }
+    canvas.width = layout.width * zoom;
+    canvas.height = layout.height * zoom;
 
-  function paintCell(cellId: string) {
-    if (!project || !activeSegment) return;
-    if (!isSourceSegment) return;
+    ctx.save();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.translate(pan.x, pan.y);
+    ctx.scale(zoom, zoom);
 
-    const currentColor = project.patternMap[cellId] ?? null;
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, layout.width, layout.height);
 
-    if (activeTool === 'picker') {
-      if (currentColor) dispatch(setActiveColor(currentColor));
-      return;
-    }
+    for (const segment of project.segments) {
+      for (const cell of segment.cells) {
+        const position = getCellPosition(cell);
+        if (!position) continue;
 
-    let newMap: PatternMap = { ...project.patternMap };
+        ctx.fillStyle = getCellColor(cell);
+        ctx.beginPath();
+        ctx.arc(position.x, position.y, position.size / 2, 0, Math.PI * 2);
+        ctx.fill();
 
-    if (activeTool === 'pencil') {
-      const newColor = activeColorId;
-      newMap[cellId] = newColor;
-    } else if (activeTool === 'eraser') {
-      newMap[cellId] = null;
-    } else if (activeTool === 'fill') {
-      const toFill = floodFill(
-        activeSegment.cells,
-        cellId,
-        currentColor,
-        activeColorId,
-        project.patternMap
-      );
-      for (const id of toFill) {
-        newMap[id] = activeColorId;
+        ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+        ctx.lineWidth = 1 / zoom;
+        ctx.stroke();
       }
     }
 
-    // Apply symmetry
-    if (project.symmetry.mode === 'radial' && project.symmetry.sourceSegmentId) {
-      newMap = applyRadialSymmetry(project.segments, project.symmetry.sourceSegmentId, newMap);
+    ctx.restore();
+  }, [project.segments, layout, zoom, pan, getCellColor, getCellPosition]);
+
+  const paintCell = useCallback(
+    (clientX: number, clientY: number) => {
+      const hit = findCellAtPoint(clientX, clientY);
+      if (!hit) return;
+
+      const nextPatternMap: PatternMap = { ...project.patternMap };
+      if (selectedColorId) {
+        nextPatternMap[hit.cell.id] = selectedColorId;
+      } else {
+        delete nextPatternMap[hit.cell.id];
+      }
+      dispatch(
+        updatePatternMap({ projectId: project.projectId, patternMap: nextPatternMap })
+      );
+    },
+    [dispatch, findCellAtPoint, project.patternMap, project.projectId, selectedColorId]
+  );
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    lastPointerRef.current = { x: event.clientX, y: event.clientY };
+
+    if (event.button === 1 || event.button === 2 || event.shiftKey) {
+      isPanningRef.current = true;
+      return;
     }
 
-    dispatch(
-      pushHistory({
-        patternMap: project.patternMap,
-        description: `paint ${activeTool}`,
-      })
-    );
-    dispatch(updatePatternMap({ projectId, patternMap: newMap }));
-  }
+    // Snapshot historii tylko raz — na początku pociągnięcia pędzla,
+    // a nie przy każdej malowanej komórce.
+    dispatch(pushHistory(project.patternMap));
+    isPaintingRef.current = true;
+    paintCell(event.clientX, event.clientY);
+  };
 
-  function getCellPosition(row: number, col: number): { x: number; y: number } {
-    const colsInRow = row + 1;
-    const rowWidth = colsInRow * CELL_SIZE;
-    const maxRowWidth = (activeSegment?.rows ?? 1) * CELL_SIZE;
-    const offsetX = (maxRowWidth - rowWidth) / 2;
-    const x = PADDING + offsetX + col * CELL_SIZE + CELL_SIZE / 2;
-    const y = PADDING + row * CELL_SIZE * 0.87 + CELL_SIZE / 2;
-    return { x, y };
-  }
+  const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const last = lastPointerRef.current;
 
-  const svgWidth = ((activeSegment?.rows ?? 1) + 1) * CELL_SIZE + PADDING * 2;
-  const svgHeight = ((activeSegment?.rows ?? 1) + 1) * CELL_SIZE * 0.87 + PADDING * 2;
+    if (isPanningRef.current && last) {
+      dispatch(
+        setEditorPan({ x: pan.x + event.clientX - last.x, y: pan.y + event.clientY - last.y })
+      );
+      lastPointerRef.current = { x: event.clientX, y: event.clientY };
+      return;
+    }
 
-  if (!project || !activeSegment) {
-    return (
-      <div className="flex-1 flex items-center justify-center text-gray-500">
-        Brak segmentu
-      </div>
-    );
-  }
+    if (isPaintingRef.current) {
+      paintCell(event.clientX, event.clientY);
+    }
+  };
+
+  const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    isPaintingRef.current = false;
+    isPanningRef.current = false;
+    lastPointerRef.current = null;
+    setPointerVersion((version) => version + 1);
+  };
+
+  const handleWheel = (event: React.WheelEvent<HTMLCanvasElement>) => {
+    const nextZoom = clampZoom(zoom * (event.deltaY < 0 ? 1.1 : 0.9));
+    dispatch(setEditorZoom(nextZoom));
+  };
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Toolbar */}
-      <div className="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-[#0f3460] shrink-0">
-        <span className="text-xs text-gray-400">
-          Segment: <span className="text-white">{activeSegment.id}</span>
-          {!isSourceSegment && (
-            <span className="ml-2 text-yellow-400 text-xs">
-              (tylko odczyt – symetria)
-            </span>
-          )}
-        </span>
-        <div className="flex items-center gap-2 ml-auto">
-          <button
-            onClick={() => setZoom((z) => Math.min(3, z + 0.2))}
-            className="px-2 py-1 bg-[#0f3460] rounded text-xs hover:bg-[#1a4f8a]"
-          >
-            +
-          </button>
-          <span className="text-xs text-gray-400">{Math.round(zoom * 100)}%</span>
-          <button
-            onClick={() => setZoom((z) => Math.max(0.4, z - 0.2))}
-            className="px-2 py-1 bg-[#0f3460] rounded text-xs hover:bg-[#1a4f8a]"
-          >
-            −
-          </button>
-          <button
-            onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
-            className="px-2 py-1 bg-[#0f3460] rounded text-xs hover:bg-[#1a4f8a]"
-          >
-            Reset
-          </button>
-        </div>
-      </div>
-
-      {/* SVG Canvas */}
-      <div className="flex-1 overflow-hidden flex items-center justify-center bg-[#12122a]">
-        <svg
-          ref={svgRef}
-          width={svgWidth * zoom}
-          height={svgHeight * zoom}
-          viewBox={`0 0 ${svgWidth} ${svgHeight}`}
-          style={{ transform: `translate(${pan.x}px, ${pan.y}px)`, cursor: isSourceSegment ? 'crosshair' : 'not-allowed' }}
-          onMouseLeave={() => dispatch(setHoveredCell(null))}
-        >
-          {/* Grid lines */}
-          {activeSegment.cells.map((cell) => {
-            const { x, y } = getCellPosition(cell.row, cell.col);
-            const fillColor = getCellColor(cell.id);
-            const r = CELL_SIZE * 0.38;
-
-            return (
-              <g key={cell.id}>
-                <circle
-                  cx={x}
-                  cy={y}
-                  r={r}
-                  fill={fillColor}
-                  stroke={fillColor === '#2a2a3e' ? '#3a3a5e' : '#1a1a2e'}
-                  strokeWidth={1}
-                  className="bead-cell"
-                  onMouseEnter={() => dispatch(setHoveredCell(cell.id))}
-                  onMouseDown={(e) => {
-                    if (e.button !== 0) return;
-                    setIsPainting(true);
-                    paintCell(cell.id);
-                  }}
-                  onMouseUp={() => setIsPainting(false)}
-                  onMouseMove={() => {
-                    if (isPainting) paintCell(cell.id);
-                  }}
-                />
-                {/* Highlight */}
-                <circle
-                  cx={x - r * 0.2}
-                  cy={y - r * 0.25}
-                  r={r * 0.3}
-                  fill="rgba(255,255,255,0.18)"
-                  pointerEvents="none"
-                />
-              </g>
-            );
-          })}
-          {/* Row labels */}
-          {Array.from({ length: activeSegment.rows }, (_, row) => (
-            <text
-              key={`row-${row}`}
-              x={4}
-              y={getCellPosition(row, 0).y + 4}
-              fontSize={9}
-              fill="#555"
-              fontFamily="monospace"
-            >
-              {row + 1}
-            </text>
-          ))}
-        </svg>
-      </div>
-    </div>
+    <section aria-label="Edytor wzoru 2D" className="pattern-editor">
+      <canvas
+        ref={canvasRef}
+        className="pattern-editor__canvas"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onWheel={handleWheel}
+        onContextMenu={(event) => event.preventDefault()}
+      />
+    </section>
   );
 }
