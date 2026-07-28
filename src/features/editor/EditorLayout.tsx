@@ -48,16 +48,19 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
     dispatch(setActiveProject(null));
   };
 
-  // Fix #5: <a> podłączony do document.body przed .click() — wymagane w Firefox
+  // Fix #2: try/finally gwarantuje usunięcie <a> z DOM nawet przy wyjątku
   const handleExportTexture = () => {
-    const engine = new ProjectionEngine(project);
-    const result = engine.project2D();
     const link = document.createElement('a');
-    link.href = result.textureCanvas.toDataURL('image/png');
-    link.download = `${project.name}-texture.png`;
     document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    try {
+      const engine = new ProjectionEngine(project);
+      const result = engine.project2D();
+      link.href = result.textureCanvas.toDataURL('image/png');
+      link.download = `${project.name}-texture.png`;
+      link.click();
+    } finally {
+      document.body.removeChild(link);
+    }
   };
 
   return (

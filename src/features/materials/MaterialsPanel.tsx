@@ -41,13 +41,16 @@ export default function MaterialsPanel({ project }: MaterialsPanelProps) {
     };
   }, [project.segments, project.patternMap, project.palette.colors]);
 
-  // Fix #3: instrukcje rzędami — grupowanie komórek po cell.row z kolorami
+  // Fix #4: zastąpiono non-null assertion rowMap.get(cell.row)! bezpiecznym wzorcem
   const rowGroups = useMemo<RowGroup[]>(() => {
     const rowMap = new Map<number, { total: number; colorCounts: Map<string, number> }>();
     for (const segment of project.segments) {
       for (const cell of segment.cells) {
-        if (!rowMap.has(cell.row)) rowMap.set(cell.row, { total: 0, colorCounts: new Map() });
-        const entry = rowMap.get(cell.row)!;
+        let entry = rowMap.get(cell.row);
+        if (!entry) {
+          entry = { total: 0, colorCounts: new Map() };
+          rowMap.set(cell.row, entry);
+        }
         entry.total += 1;
         const colorId = project.patternMap[cell.id];
         if (colorId) {

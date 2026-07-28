@@ -105,8 +105,9 @@ export default function ExportPanel({ project }: ExportPanelProps) {
       }));
   }, [paletteWithRgb, project.patternMap]);
 
+  // Fix #1: przywrócono cellId w rowInstructions — był potrzebny downstream (np. PDF renderer)
   const rowInstructions = useMemo(() => {
-    const rowMap = new Map<number, { colorHex: string; colorName: string }[]>();
+    const rowMap = new Map<number, { cellId: string; colorHex: string; colorName: string }[]>();
     for (const segment of project.segments) {
       for (const cell of segment.cells) {
         const colorId = project.patternMap[cell.id];
@@ -114,7 +115,10 @@ export default function ExportPanel({ project }: ExportPanelProps) {
         const color = colorMap.get(colorId);
         if (!color) continue;
         if (!rowMap.has(cell.row)) rowMap.set(cell.row, []);
-        rowMap.get(cell.row)!.push({ colorHex: color.hex, colorName: color.name });
+        const bucket = rowMap.get(cell.row);
+        if (bucket) {
+          bucket.push({ cellId: cell.id, colorHex: color.hex, colorName: color.name });
+        }
       }
     }
     return Array.from(rowMap.entries()).sort(([a], [b]) => a - b);
@@ -199,12 +203,14 @@ export default function ExportPanel({ project }: ExportPanelProps) {
     }
   }, [bomEntries, invalidColors, project, rowInstructions]);
 
-  // Fix #3: downloadProjectJSON używa zaktualizowanej sygnatury exportProjectToJSON
+  // Fix #2: disabled={isExporting} zapobiega race condition przy wielokrotnym kliknięciu
+  // Fix #3: console.error w catch ułatwia debugowanie błędów eksportu JSON
   const handleExportJson = useCallback(() => {
     try {
       downloadProjectJSON(project);
       setExportError(null);
-    } catch {
+    } catch (error) {
+      console.error('[ExportPanel] handleExportJson failed:', error);
       setExportError('Eksport JSON nie powiódł się.');
     }
   }, [project]);
@@ -239,7 +245,8 @@ export default function ExportPanel({ project }: ExportPanelProps) {
         <button type="button" onClick={handleExportPdf} disabled={isExporting}>
           {isExporting ? 'Eksportowanie…' : 'Eksportuj do PDF'}
         </button>
-        <button type="button" onClick={handleExportJson}>
+        {/* Fix #2: disabled={isExporting} — eliminuje ryzyko race condition */}
+        <button type="button" onClick={handleExportJson} disabled={isExporting}>
           Eksportuj do JSON
         </button>
       </div>

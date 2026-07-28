@@ -38,6 +38,8 @@ function getUniqueProjectName(
   return candidate;
 }
 
+const ALLOWED_MIME_TYPES = new Set(['application/json', 'text/json', 'text/plain']);
+
 export default function Dashboard() {
   const dispatch = useAppDispatch();
   const projects = useAppSelector((state) => state.projects.projects);
@@ -65,10 +67,31 @@ export default function Dashboard() {
     setImportError(null);
   };
 
+  // Fix #1: walidacja MIME type i rozszerzenia pliku przed parsowaniem
   const handleImportFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
+
+    const hasValidExtension = file.name.toLowerCase().endsWith('.json');
+    const hasValidMime =
+      ALLOWED_MIME_TYPES.has(file.type) ||
+      // Niektóre systemy operacyjne zwracają pusty string jako MIME dla .json
+      file.type === '';
+
+    if (!hasValidExtension) {
+      setNotice(null);
+      setImportError('Nieprawidłowy typ pliku — wymagany plik z rozszerzeniem .json.');
+      return;
+    }
+
+    if (!hasValidMime && file.type !== '') {
+      setNotice(null);
+      setImportError(
+        `Nieprawidłowy typ MIME pliku (${file.type}) — oczekiwano application/json.`
+      );
+      return;
+    }
 
     const reader = new FileReader();
     reader.onload = () => {

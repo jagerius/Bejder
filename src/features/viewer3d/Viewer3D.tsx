@@ -1,7 +1,6 @@
 tsx
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { ProjectionEngine } from '@/domain/projection/ProjectionEngine';
 import type { Project } from '@/shared/types';
 
@@ -10,114 +9,77 @@ interface Viewer3DProps {
 }
 
 export default function Viewer3D({ project }: Viewer3DProps) {
-  const mountRef = useRef<HTMLDivElement | null>(null);
-  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-  const sphereMeshRef = useRef<THREE.Mesh | null>(null);
-  const textureRef = useRef<THREE.CanvasTexture | null>(null);
-  const animFrameRef = useRef<number>(0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  // Fix #1: animFrameRef inicjalizowany na 0; 0 = brak aktywnej klatki animacji
+  const animFrameRef = useRef(0);
 
-  // Fix #5: scena Three.js inicjalizowana TYLKO RAZ — zależność []
+  const engine = useMemo(() => new ProjectionEngine(project), [project]);
+
   useEffect(() => {
-    const mount = mountRef.current;
-    if (!mount) return;
+    const container = containerRef.current;
+    if (!container) return;
 
-    const width = mount.clientWidth || 640;
-    const height = mount.clientHeight || 480;
+    const width = container.clientWidth || 640;
+    const height = container.clientHeight || 480;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#10101a');
+
+    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+    const radiusMm = project.ornamentSpec.diameterMm / 2;
+    camera.position.set(0, radiusMm * 1.5, radiusMm * 3);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(window.devicePixelRatio);
-    mount.appendChild(renderer.domElement);
-    rendererRef.current = renderer;
+    container.appendChild(renderer.domElement);
 
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#0f0f1a');
+    const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambient);
+    const directional = new THREE.DirectionalLight(0xffffff, 0.9);
+    directional.position.set(1, 1, 1);
+    scene.add(directional);
 
-    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 1000);
-    camera.position.set(0, 0, 2.5);
+    const result = engine.project2D();
+    const texture = new THREE.CanvasTexture(result.textureCanvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
-    dirLight.position.set(5, 5, 5);
-    scene.add(dirLight);
-
-    const geometry = new THREE.SphereGeometry(1, 64, 64);
-    const material = new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.1 });
-    const sphereMesh = new THREE.Mesh(geometry, material);
-    scene.add(sphereMesh);
-    sphereMeshRef.current = sphereMesh;
-
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
-    controls.minDistance = 1.5;
-    controls.maxDistance = 6;
-
-    const resizeObserver = new ResizeObserver(() => {
-      const w = mount.clientWidth;
-      const h = mount.clientHeight;
-      if (w === 0 || h === 0) return;
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
-    });
-    resizeObserver.observe(mount);
+    const geometry = new THREE.SphereGeometry(radiusMm, 96, 96);
+    const material = new THREE.MeshStandardMaterial({ map: texture });
+    const sphere = new THREE.Mesh(geometry, material);
+    scene.add(sphere);
 
     const animate = () => {
       animFrameRef.current = requestAnimationFrame(animate);
-      controls.update();
+      sphere.rotation.y += 0.005;
       renderer.render(scene, camera);
     };
-    animate();
+    animFrameRef.current = requestAnimationFrame(animate);
 
     return () => {
-      cancelAnimationFrame(animFrameRef.current);
-      resizeObserver.disconnect();
-      controls.dispose();
-      renderer.dispose();
+      // Fix #1: reset do 0 po cancelAnimationFrame — brak ryzyka
+      // błędnego anulowania nowej klatki po remount komponentu
+      if (animFrameRef.current !== 0) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = 0;
+      }
+      texture.dispose();
       geometry.dispose();
       material.dispose();
-      if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
-      rendererRef.current = null;
-      sphereMeshRef.current = null;
-      textureRef.current = null;
+      renderer.dispose();
+      if (renderer.domElement.parentElement === container) {
+        container.removeChild(renderer.domElement);
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Fix #5: aktualizacja TYLKO tekstury przy zmianie projektu —
-  // renderer, geometria i materiał nie są odtwarzane
-  useEffect(() => {
-    const sphereMesh = sphereMeshRef.current;
-    if (!sphereMesh) return;
-
-    const engine = new ProjectionEngine(project);
-    const result = engine.project2D();
-
-    if (textureRef.current) {
-      textureRef.current.dispose();
-    }
-
-    const texture = new THREE.CanvasTexture(result.textureCanvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    textureRef.current = texture;
-
-    const material = sphereMesh.material as THREE.MeshStandardMaterial;
-    material.map = texture;
-    material.needsUpdate = true;
-  }, [project]);
+  }, [engine, project.ornamentSpec.diameterMm]);
 
   return (
     <section aria-label="Podgląd 3D" className="viewer-3d">
       <div
-        ref={mountRef}
-        className="viewer-3d__canvas-container"
+        ref={containerRef}
+        className="viewer-3d__viewport"
         aria-label="Interaktywny podgląd ornamentu 3D"
-        role="img"
       />
-      <p className="viewer-3d__hint">
-        Przeciągnij aby obrócić · Scroll aby przybliżyć
-      </p>
     </section>
   );
 }

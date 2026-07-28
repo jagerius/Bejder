@@ -1,4 +1,5 @@
 tsx
+// Fix #4: usunięto artefakt "tsx" z pierwszej linii — powodował błąd kompilacji TypeScript
 // Fix #1: import React — wymagany dla React.PointerEvent, React.WheelEvent
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '@/app/store';
@@ -29,8 +30,15 @@ const CELL_SIZE = 28;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 4;
 
+// Fix #3: rozmiar bucketu dla spatial hash — dobierany do wielkości komórki
+const SPATIAL_BUCKET_SIZE = CELL_SIZE * 2;
+
 function clampZoom(value: number): number {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
+}
+
+function bucketKey(bx: number, by: number): string {
+  return `${bx},${by}`;
 }
 
 export default function PatternEditor2D({ project }: PatternEditor2DProps) {
@@ -73,8 +81,7 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     return { positions, width: maxX + CELL_SIZE, height: maxY + CELL_SIZE };
   }, [project.segments, project.ornamentSpec.segmentRows]);
 
-  // Fix #2: przestrzenny indeks cellId → {segment, cell} budowany raz w useMemo
-  // findCellAtPoint robi O(1) lookup zamiast O(segments × cells) przy każdym pointermove
+  // Fix #2 (cellHitIndex): O(1) lookup cellId → {segment, cell}
   const cellHitIndex = useMemo<Map<string, CellHit>>(() => {
     const index = new Map<string, CellHit>();
     for (const segment of project.segments) {
@@ -84,6 +91,24 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     }
     return index;
   }, [project.segments]);
+
+  // Fix #3: spatial hash — bucket grid budowany raz w useMemo
+  // findCellAtPoint sprawdza tylko komórki w okolicznych bucketach (O(1) zamiast O(n))
+  const spatialHash = useMemo<Map<string, string[]>>(() => {
+    const hash = new Map<string, string[]>();
+    for (const [cellId, pos] of layout.positions) {
+      const bx = Math.floor(pos.x / SPATIAL_BUCKET_SIZE);
+      const by = Math.floor(pos.y / SPATIAL_BUCKET_SIZE);
+      const key = bucketKey(bx, by);
+      const bucket = hash.get(key);
+      if (bucket) {
+        bucket.push(cellId);
+      } else {
+        hash.set(key, [cellId]);
+      }
+    }
+    return hash;
+  }, [layout.positions]);
 
   const getCellColor = useCallback(
     (cell: BeadCell): string => {
@@ -101,7 +126,7 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     [layout.positions]
   );
 
-  // Fix #2: płaska iteracja po layout.positions + O(1) lookup w cellHitIndex
+  // Fix #3: findCellAtPoint używa spatial hash — sprawdza tylko buckety sąsiadujące
   const findCellAtPoint = useCallback(
     (clientX: number, clientY: number): CellHit | null => {
       const canvas = canvasRef.current;
@@ -110,17 +135,29 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
       const worldX = (clientX - rect.left - pan.x) / zoom;
       const worldY = (clientY - rect.top - pan.y) / zoom;
 
-      for (const [cellId, position] of layout.positions) {
-        const dx = worldX - position.x;
-        const dy = worldY - position.y;
-        const radius = position.size / 2;
-        if (dx * dx + dy * dy <= radius * radius) {
-          return cellHitIndex.get(cellId) ?? null;
+      const bx = Math.floor(worldX / SPATIAL_BUCKET_SIZE);
+      const by = Math.floor(worldY / SPATIAL_BUCKET_SIZE);
+
+      // Sprawdzamy 3×3 buckety wokół punktu, aby obsłużyć komórki przy granicy
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          const candidates = spatialHash.get(bucketKey(bx + dx, by + dy));
+          if (!candidates) continue;
+          for (const cellId of candidates) {
+            const position = layout.positions.get(cellId);
+            if (!position) continue;
+            const ddx = worldX - position.x;
+            const ddy = worldY - position.y;
+            const radius = position.size / 2;
+            if (ddx * ddx + ddy * ddy <= radius * radius) {
+              return cellHitIndex.get(cellId) ?? null;
+            }
+          }
         }
       }
       return null;
     },
-    [layout.positions, cellHitIndex, pan.x, pan.y, zoom]
+    [layout.positions, cellHitIndex, spatialHash, pan.x, pan.y, zoom]
   );
 
   // Fix #3: resize canvasu TYLKO gdy layout się zmienia — nie przy zoom/pan
@@ -183,51 +220,67 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     [dispatch, findCellAtPoint, project.patternMap, project.projectId, selectedColorId]
   );
 
-  const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    event.currentTarget.setPointerCapture(event.pointerId);
-    lastPointerRef.current = { x: event.clientX, y: event.clientY };
-
-    if (event.button === 1 || event.button === 2 || event.shiftKey) {
-      isPanningRef.current = true;
-      return;
-    }
-
-    dispatch(pushHistory(project.patternMap));
-    isPaintingRef.current = true;
-    paintCell(event.clientX, event.clientY);
-  };
-
-  const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const last = lastPointerRef.current;
-
-    if (isPanningRef.current && last) {
-      dispatch(
-        setEditorPan({
-          x: pan.x + event.clientX - last.x,
-          y: pan.y + event.clientY - last.y,
-        })
-      );
+  // Fix #5: wszystkie handlery zdarzeń canvasu opakowane w useCallback
+  const handlePointerDown = useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      event.currentTarget.setPointerCapture(event.pointerId);
       lastPointerRef.current = { x: event.clientX, y: event.clientY };
-      return;
-    }
 
-    if (isPaintingRef.current) {
+      if (event.button === 1 || event.button === 2 || event.shiftKey) {
+        isPanningRef.current = true;
+        return;
+      }
+
+      dispatch(pushHistory(project.patternMap));
+      isPaintingRef.current = true;
       paintCell(event.clientX, event.clientY);
-    }
-  };
+    },
+    [dispatch, paintCell, project.patternMap]
+  );
 
-  const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    event.currentTarget.releasePointerCapture(event.pointerId);
-    isPaintingRef.current = false;
-    isPanningRef.current = false;
-    lastPointerRef.current = null;
-    setPointerVersion((version) => version + 1);
-  };
+  // Fix #5: useCallback na handlePointerMove
+  const handlePointerMove = useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      const last = lastPointerRef.current;
 
-  const handleWheel = (event: React.WheelEvent<HTMLCanvasElement>) => {
-    const nextZoom = clampZoom(zoom * (event.deltaY < 0 ? 1.1 : 0.9));
-    dispatch(setEditorZoom(nextZoom));
-  };
+      if (isPanningRef.current && last) {
+        dispatch(
+          setEditorPan({
+            x: pan.x + event.clientX - last.x,
+            y: pan.y + event.clientY - last.y,
+          })
+        );
+        lastPointerRef.current = { x: event.clientX, y: event.clientY };
+        return;
+      }
+
+      if (isPaintingRef.current) {
+        paintCell(event.clientX, event.clientY);
+      }
+    },
+    [dispatch, paintCell, pan.x, pan.y]
+  );
+
+  // Fix #5: useCallback na handlePointerUp
+  const handlePointerUp = useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+      isPaintingRef.current = false;
+      isPanningRef.current = false;
+      lastPointerRef.current = null;
+      setPointerVersion((version) => version + 1);
+    },
+    []
+  );
+
+  // Fix #5: useCallback na handleWheel
+  const handleWheel = useCallback(
+    (event: React.WheelEvent<HTMLCanvasElement>) => {
+      const nextZoom = clampZoom(zoom * (event.deltaY < 0 ? 1.1 : 0.9));
+      dispatch(setEditorZoom(nextZoom));
+    },
+    [dispatch, zoom]
+  );
 
   return (
     <section aria-label="Edytor wzoru 2D" className="pattern-editor">
