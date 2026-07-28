@@ -39,6 +39,8 @@ function getUniqueProjectName(
 }
 
 const ALLOWED_MIME_TYPES = new Set(['application/json', 'text/json', 'text/plain']);
+// Fix #5: maksymalny dozwolony rozmiar pliku importu — 5 MB
+const MAX_IMPORT_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 
 export default function Dashboard() {
   const dispatch = useAppDispatch();
@@ -67,28 +69,34 @@ export default function Dashboard() {
     setImportError(null);
   };
 
-  // Fix #1: walidacja MIME type i rozszerzenia pliku przed parsowaniem
   const handleImportFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
 
-    const hasValidExtension = file.name.toLowerCase().endsWith('.json');
-    const hasValidMime =
-      ALLOWED_MIME_TYPES.has(file.type) ||
-      // Niektóre systemy operacyjne zwracają pusty string jako MIME dla .json
-      file.type === '';
-
-    if (!hasValidExtension) {
+    // Fix #5: limit rozmiaru pliku sprawdzany przed FileReader — zapobiega
+    // wczytaniu bardzo dużych plików (setki MB) do pamięci przez readAsText
+    if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
       setNotice(null);
-      setImportError('Nieprawidłowy typ pliku — wymagany plik z rozszerzeniem .json.');
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+      const limitMb = (MAX_IMPORT_FILE_SIZE_BYTES / (1024 * 1024)).toFixed(0);
+      setImportError(
+        `Plik jest za duży (${sizeMb} MB) — maksymalny rozmiar to ${limitMb} MB.`
+      );
       return;
     }
 
-    if (!hasValidMime && file.type !== '') {
+    // Fix #1: walidacja rozszerzenia i MIME scalona w jeden, jednoznaczny warunek.
+    // Pusty file.type jest traktowany jako brak informacji o MIME (niektóre OS
+    // nie raportują typu dla .json) — wtedy decyduje samo rozszerzenie.
+    const hasValidExtension = file.name.toLowerCase().endsWith('.json');
+    const isMimeAcceptable =
+      file.type === '' || ALLOWED_MIME_TYPES.has(file.type);
+
+    if (!hasValidExtension || !isMimeAcceptable) {
       setNotice(null);
       setImportError(
-        `Nieprawidłowy typ MIME pliku (${file.type}) — oczekiwano application/json.`
+        `Nieprawidłowy typ pliku — oczekiwano pliku JSON (.json, application/json). Otrzymano: "${file.name}" (${file.type || 'nieznany MIME'}).`
       );
       return;
     }

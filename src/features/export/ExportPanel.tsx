@@ -28,6 +28,8 @@ const PAGE_WIDTH_MM = 297;
 const PAGE_HEIGHT_MM = 210;
 const MARGIN_MM = 14;
 const LINE_HEIGHT_MM = 8;
+// Fix #3: maksymalny czas oczekiwania na toBlob/FileReader — 30 s
+const CANVAS_TO_DATA_URL_TIMEOUT_MS = 30_000;
 
 function hexToRgb(hex: string): RgbColor | null {
   if (!HEX_PATTERN.test(hex)) return null;
@@ -55,16 +57,36 @@ function ensureLineSpace(pdf: jsPDF, cursorY: number, title?: string): number {
   return MARGIN_MM;
 }
 
+// Fix #3: timeout 30 s — jeśli toBlob lub FileReader nie odpowie (np. zawieszony
+// GPU context), Promise jest odrzucany i isExporting resetowany przez finally
+// w handleExportPdf zamiast pozostawać true na zawsze
 function canvasToDataURL(canvas: HTMLCanvasElement): Promise<string> {
   return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error('canvasToDataURL: przekroczono limit czasu (30 s)'));
+    }, CANVAS_TO_DATA_URL_TIMEOUT_MS);
+
+    const cleanup = () => clearTimeout(timeoutId);
+
     canvas.toBlob((blob) => {
-      if (!blob) { reject(new Error('toBlob zwrócił null')); return; }
+      if (!blob) {
+        cleanup();
+        reject(new Error('toBlob zwrócił null'));
+        return;
+      }
       const reader = new FileReader();
       reader.onload = () => {
-        if (typeof reader.result === 'string') { resolve(reader.result); }
-        else { reject(new Error('FileReader zwrócił nie-string wynik')); }
+        cleanup();
+        if (typeof reader.result === 'string') {
+          resolve(reader.result);
+        } else {
+          reject(new Error('FileReader zwrócił nie-string wynik'));
+        }
       };
-      reader.onerror = () => reject(reader.error ?? new Error('FileReader błąd'));
+      reader.onerror = () => {
+        cleanup();
+        reject(reader.error ?? new Error('FileReader błąd'));
+      };
       reader.readAsDataURL(blob);
     }, 'image/png');
   });
@@ -106,6 +128,8 @@ export default function ExportPanel({ project }: ExportPanelProps) {
   }, [paletteWithRgb, project.patternMap]);
 
   // Fix #1: przywrócono cellId w rowInstructions — był potrzebny downstream (np. PDF renderer)
+  // Fix #2: wzorzec ?? + set zamiast podwójnego rowMap.get(cell.row) —
+  // jedna operacja lookup na komórkę, spójne z wzorcem z MaterialsPanel
   const rowInstructions = useMemo(() => {
     const rowMap = new Map<number, { cellId: string; colorHex: string; colorName: string }[]>();
     for (const segment of project.segments) {
@@ -114,11 +138,11 @@ export default function ExportPanel({ project }: ExportPanelProps) {
         if (!colorId) continue;
         const color = colorMap.get(colorId);
         if (!color) continue;
-        if (!rowMap.has(cell.row)) rowMap.set(cell.row, []);
-        const bucket = rowMap.get(cell.row);
-        if (bucket) {
-          bucket.push({ cellId: cell.id, colorHex: color.hex, colorName: color.name });
+        const bucket = rowMap.get(cell.row) ?? [];
+        if (bucket.length === 0) {
+          rowMap.set(cell.row, bucket);
         }
+        bucket.push({ cellId: cell.id, colorHex: color.hex, colorName: color.name });
       }
     }
     return Array.from(rowMap.entries()).sort(([a], [b]) => a - b);
@@ -196,63 +220,60 @@ export default function ExportPanel({ project }: ExportPanelProps) {
       }
 
       pdf.save(`${project.name}.pdf`);
-    } catch {
+    } catch (error) {
+      console.error('[ExportPanel] Eksport PDF nie powiódł się:', error);
       setExportError('Eksport PDF nie powiódł się.');
     } finally {
       setIsExporting(false);
     }
-  }, [bomEntries, invalidColors, project, rowInstructions]);
+  }, [project, invalidColors, bomEntries, rowInstructions]);
 
-  // Fix #2: disabled={isExporting} zapobiega race condition przy wielokrotnym kliknięciu
-  // Fix #3: console.error w catch ułatwia debugowanie błędów eksportu JSON
   const handleExportJson = useCallback(() => {
+    setIsExporting(true);
+    setExportError(null);
     try {
       downloadProjectJSON(project);
-      setExportError(null);
     } catch (error) {
-      console.error('[ExportPanel] handleExportJson failed:', error);
+      console.error('[ExportPanel] Eksport JSON nie powiódł się:', error);
       setExportError('Eksport JSON nie powiódł się.');
+    } finally {
+      setIsExporting(false);
     }
   }, [project]);
 
   return (
     <section aria-label="Panel eksportu" className="export-panel">
       <h2>Eksport</h2>
-      <ul className="export-panel__palette">
-        {bomEntries.map((entry) => (
-          <li key={entry.colorId}>
-            <span
-              className="export-panel__swatch"
-              style={{ backgroundColor: entry.hex }}
-              aria-hidden="true"
-            />
-            <span>{entry.name}</span>
-            <code>{entry.hex}</code>
-            <span>{entry.count} szt.</span>
-          </li>
-        ))}
-      </ul>
-      {invalidColors.length > 0 ? (
-        <ul className="export-panel__invalid-list">
-          {invalidColors.map((color) => (
-            <li key={color.id} role="alert">
-              {color.name} ({color.hex}) — nieprawidłowy HEX
+
+      <div className="export-panel__actions">
+        <button type="button" onClick={handleExportPdf} disabled={isExporting}>
+          {isExporting ? 'Eksportowanie…' : 'Eksportuj PDF'}
+        </button>
+        <button type="button" onClick={handleExportJson} disabled={isExporting}>
+          {isExporting ? 'Eksportowanie…' : 'Eksportuj JSON'}
+        </button>
+      </div>
+
+      {exportError ? (
+        <p role="alert" className="export-panel__error">
+          {exportError}
+        </p>
+      ) : null}
+
+      <section aria-label="Lista materiałów">
+        <h3>Lista materiałów (BOM)</h3>
+        <ul>
+          {bomEntries.map((entry) => (
+            <li key={entry.colorId}>
+              <span
+                aria-hidden="true"
+                style={{ backgroundColor: entry.hex, display: 'inline-block', width: 12, height: 12, borderRadius: 2, marginRight: 6 }}
+              />
+              {entry.name} ({entry.hex}) — {entry.count} szt.
             </li>
           ))}
         </ul>
-      ) : null}
-      <div className="export-panel__actions">
-        <button type="button" onClick={handleExportPdf} disabled={isExporting}>
-          {isExporting ? 'Eksportowanie…' : 'Eksportuj do PDF'}
-        </button>
-        {/* Fix #2: disabled={isExporting} — eliminuje ryzyko race condition */}
-        <button type="button" onClick={handleExportJson} disabled={isExporting}>
-          Eksportuj do JSON
-        </button>
-      </div>
-      {exportError ? (
-        <p role="alert" className="export-panel__error">{exportError}</p>
-      ) : null}
+      </section>
     </section>
   );
 }

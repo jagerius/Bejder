@@ -56,8 +56,17 @@ export const projectSchema = z.object({
   }),
 });
 
+// Fix #5: singleton — jedna instancja połączenia IDB współdzielona przez
+// wszystkie operacje. Cache Promise eliminuje race condition przy równoległych
+// wywołaniach (wszystkie czekają na to samo Promise zamiast otwierać
+// równoległe połączenia). onblocked i onversionchange obsługują scenariusz
+// aktualizacji wersji bazy w innej karcie przeglądarki.
+let dbPromise: Promise<IDBDatabase> | null = null;
+
 function openDatabase(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+
+  dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(IDB_DB_NAME, IDB_VERSION);
 
     request.onupgradeneeded = () => {
@@ -67,50 +76,88 @@ function openDatabase(): Promise<IDBDatabase> {
       }
     };
 
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () =>
+    // Inna karta/okno trzyma starą wersję bazy — ostrzegamy w konsoli,
+    // że upgrade jest zablokowany. Bez tego handleru request czekałby
+    // w nieskończoność bez żadnej informacji zwrotnej.
+    request.onblocked = () => {
+      console.warn(
+        '[persistence] IndexedDB upgrade zablokowany przez inne połączenie. Zamknij pozostałe karty aplikacji.'
+      );
+    };
+
+    request.onsuccess = () => {
+      const db = request.result;
+
+      // Gdy inna karta inicjuje upgrade, zamykamy to połączenie,
+      // aby nie blokować migracji — singleton jest resetowany,
+      // kolejne wywołanie openDatabase() otworzy nowe połączenie.
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+        console.warn(
+          '[persistence] IndexedDB: wykryto zmianę wersji w innej karcie — połączenie zamknięte.'
+        );
+      };
+
+      resolve(db);
+    };
+
+    request.onerror = () => {
+      // Reset singletonu przy błędzie — pozwala na retry przy kolejnym wywołaniu
+      dbPromise = null;
       reject(request.error ?? new Error('Nie udało się otworzyć IndexedDB'));
+    };
   });
+
+  return dbPromise;
 }
 
+// Fix #1: resolve() w transaction.oncomplete zamiast request.onsuccess —
+// oncomplete gwarantuje, że wszystkie operacje w transakcji są zatwierdzone
+// (flush do dysku). request.onsuccess dla readwrite oznacza jedynie, że
+// request zakończył się bez błędu, ale transakcja może jeszcze być w toku.
+// result przechwytywany jest w request.onsuccess dla operacji readonly.
 function runTransaction<T>(
   db: IDBDatabase,
   mode: IDBTransactionMode,
-  executor: (store: IDBObjectStore, resolve: (value: T) => void, reject: (reason?: unknown) => void) => void
+  executor: (
+    store: IDBObjectStore,
+    setResult: (value: T) => void,
+    reject: (reason?: unknown) => void
+  ) => void
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const transaction = db.transaction(IDB_STORE_NAME, mode);
     const store = transaction.objectStore(IDB_STORE_NAME);
-    executor(store, resolve, reject);
+
+    let result: T;
+
+    transaction.oncomplete = () => resolve(result);
     transaction.onerror = () =>
       reject(transaction.error ?? new Error('Błąd transakcji IndexedDB'));
+    transaction.onabort = () =>
+      reject(transaction.error ?? new Error('Transakcja IndexedDB została przerwana'));
+
+    executor(store, (value) => { result = value; }, reject);
   });
 }
 
 export async function saveProjectToIDB(project: Project): Promise<void> {
   const db = await openDatabase();
-  try {
-    await runTransaction<void>(db, 'readwrite', (store, resolve, reject) => {
-      const request = store.put(project);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
-  } finally {
-    db.close();
-  }
+  await runTransaction<void>(db, 'readwrite', (store, setResult, reject) => {
+    const request = store.put(project);
+    request.onsuccess = () => setResult(undefined);
+    request.onerror = () => reject(request.error);
+  });
 }
 
 export async function deleteProjectFromIDB(projectId: string): Promise<void> {
   const db = await openDatabase();
-  try {
-    await runTransaction<void>(db, 'readwrite', (store, resolve, reject) => {
-      const request = store.delete(projectId);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
-  } finally {
-    db.close();
-  }
+  await runTransaction<void>(db, 'readwrite', (store, setResult, reject) => {
+    const request = store.delete(projectId);
+    request.onsuccess = () => setResult(undefined);
+    request.onerror = () => reject(request.error);
+  });
 }
 
 // Fix #2: uszkodzone rekordy nie są już cicho pomijane — każdy jest raportowany
@@ -118,37 +165,36 @@ export async function deleteProjectFromIDB(projectId: string): Promise<void> {
 // diagnozowanie korupcji danych w IndexedDB
 export async function loadProjectsFromIDB(): Promise<Project[]> {
   const db = await openDatabase();
-  try {
-    const records = await runTransaction<unknown[]>(db, 'readonly', (store, resolve, reject) => {
-      const request = store.getAll();
-      request.onsuccess = () => resolve(request.result as unknown[]);
-      request.onerror = () => reject(request.error);
-    });
+  const records = await runTransaction<unknown[]>(db, 'readonly', (store, setResult, reject) => {
+    const request = store.getAll();
+    request.onsuccess = () => setResult(request.result as unknown[]);
+    request.onerror = () => reject(request.error);
+  });
 
-    const projects: Project[] = [];
-    for (const record of records) {
-      const result = projectSchema.safeParse(record);
-      if (result.success) {
-        projects.push(result.data as Project);
-      } else {
-        const projectId =
-          typeof record === 'object' && record !== null && 'projectId' in record
-            ? String((record as { projectId: unknown }).projectId)
-            : '<unknown>';
-        console.warn(
-          `[persistence] Pominięto uszkodzony rekord projektu "${projectId}" z IndexedDB:`,
-          result.error.issues
-        );
-      }
+  const projects: Project[] = [];
+  for (const record of records) {
+    const result = projectSchema.safeParse(record);
+    if (result.success) {
+      projects.push(result.data as Project);
+    } else {
+      const projectId =
+        typeof record === 'object' && record !== null && 'projectId' in record
+          ? String((record as { projectId: unknown }).projectId)
+          : '<unknown>';
+      console.warn(
+        `[persistence] Pominięto uszkodzony rekord projektu "${projectId}" z IndexedDB:`,
+        result.error.issues
+      );
     }
-    return projects;
-  } finally {
-    db.close();
   }
+  return projects;
 }
 
+// Fix #4: walidacja projectSchema przed serializacją — nieprawidłowy projekt
+// rzuca ZodError zamiast eksportować uszkodzone dane bez ostrzeżenia
 export function exportProjectToJSON(project: Project): string {
-  return JSON.stringify(project, null, 2);
+  const validated = projectSchema.parse(project);
+  return JSON.stringify(validated, null, 2);
 }
 
 /**
@@ -160,11 +206,26 @@ export function exportProjectToJSON(project: Project): string {
  *
  * @param json - Surowy ciąg JSON zawierający zserializowany projekt.
  * @returns Zwalidowany i zmigrowany obiekt {@link Project}.
- * @throws {SyntaxError} Gdy `json` nie jest poprawnym dokumentem JSON.
- * @throws {z.ZodError} Gdy sparsowany obiekt nie przechodzi walidacji schematu projektu.
+ * @throws {z.ZodError} Gdy `json` nie jest poprawnym dokumentem JSON
+ *   lub gdy sparsowany obiekt nie przechodzi walidacji schematu projektu.
  */
+// Fix #2: SyntaxError z JSON.parse opakowany w ZodError — spójne z JSDoc,
+// który dokumentuje wyłącznie ZodError jako typ rzucanego błędu.
+// Wywołujący może polegać na instanceof z.ZodError niezależnie od rodzaju błędu.
 export function importProjectFromJSON(json: string): Project {
-  const parsed: unknown = JSON.parse(json);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch (error) {
+    throw new z.ZodError([
+      {
+        code: 'custom',
+        path: [],
+        message: `Nieprawidłowy format JSON: ${error instanceof SyntaxError ? error.message : String(error)}`,
+      },
+    ]);
+  }
+
   const validated = projectSchema.parse(parsed) as Project;
 
   if (

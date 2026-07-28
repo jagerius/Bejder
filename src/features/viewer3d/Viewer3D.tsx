@@ -1,6 +1,7 @@
 tsx
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { ProjectionEngine } from '@/domain/projection/ProjectionEngine';
 import type { Project } from '@/shared/types';
 
@@ -8,13 +9,23 @@ interface Viewer3DProps {
   project: Project;
 }
 
+interface SceneRefs {
+  renderer: THREE.WebGLRenderer;
+  scene: THREE.Scene;
+  camera: THREE.PerspectiveCamera;
+  controls: OrbitControls;
+  mesh: THREE.Mesh | null;
+  animationFrameId: number;
+}
+
 export default function Viewer3D({ project }: Viewer3DProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  // Fix #1: animFrameRef inicjalizowany na 0; 0 = brak aktywnej klatki animacji
-  const animFrameRef = useRef(0);
+  // Fix #5: scena przechowywana w useRef — tworzona raz, aktualizowana
+  // przez osobny useEffect bez remountu całego WebGL kontekstu
+  const sceneRefsRef = useRef<SceneRefs | null>(null);
 
-  const engine = useMemo(() => new ProjectionEngine(project), [project]);
-
+  // Fix #5: pierwszy useEffect — inicjalizacja sceny, renderer, kamera, controls.
+  // Uruchamia się dokładnie raz ([] deps). Cleanup niszczy renderer i controls.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -22,63 +33,115 @@ export default function Viewer3D({ project }: Viewer3DProps) {
     const width = container.clientWidth || 640;
     const height = container.clientHeight || 480;
 
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#10101a');
-
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
-    const radiusMm = project.ornamentSpec.diameterMm / 2;
-    camera.position.set(0, radiusMm * 1.5, radiusMm * 3);
-
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(window.devicePixelRatio);
     container.appendChild(renderer.domElement);
 
-    const ambient = new THREE.AmbientLight(0xffffff, 0.6);
-    scene.add(ambient);
-    const directional = new THREE.DirectionalLight(0xffffff, 0.9);
-    directional.position.set(1, 1, 1);
-    scene.add(directional);
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a1a2e);
 
-    const result = engine.project2D();
-    const texture = new THREE.CanvasTexture(result.textureCanvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
+    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 2000);
+    camera.position.set(0, 0, 220);
 
-    const geometry = new THREE.SphereGeometry(radiusMm, 96, 96);
-    const material = new THREE.MeshStandardMaterial({ map: texture });
-    const sphere = new THREE.Mesh(geometry, material);
-    scene.add(sphere);
+    // Fix #4: przywrócone OrbitControls — interaktywny obrót i zoom kamery
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.minDistance = 50;
+    controls.maxDistance = 800;
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    directionalLight.position.set(5, 5, 5);
+    scene.add(directionalLight);
+
+    // Fix #1: ResizeObserver zamiast window resize — reaguje na zmianę
+    // rozmiaru kontenera (np. przy przełączaniu zakładek, zmianie layoutu),
+    // a nie tylko na zmianę rozmiaru okna przeglądarki
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width: w, height: h } = entry.contentRect;
+        if (w === 0 || h === 0) return;
+        renderer.setSize(w, h);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
+    });
+    resizeObserver.observe(container);
+
+    const refs: SceneRefs = {
+      renderer,
+      scene,
+      camera,
+      controls,
+      mesh: null,
+      animationFrameId: 0,
+    };
+    sceneRefsRef.current = refs;
 
     const animate = () => {
-      animFrameRef.current = requestAnimationFrame(animate);
-      sphere.rotation.y += 0.005;
+      refs.animationFrameId = requestAnimationFrame(animate);
+      controls.update();
       renderer.render(scene, camera);
     };
-    animFrameRef.current = requestAnimationFrame(animate);
+    animate();
 
     return () => {
-      // Fix #1: reset do 0 po cancelAnimationFrame — brak ryzyka
-      // błędnego anulowania nowej klatki po remount komponentu
-      if (animFrameRef.current !== 0) {
-        cancelAnimationFrame(animFrameRef.current);
-        animFrameRef.current = 0;
-      }
-      texture.dispose();
-      geometry.dispose();
-      material.dispose();
+      cancelAnimationFrame(refs.animationFrameId);
+      resizeObserver.disconnect();
+      controls.dispose();
       renderer.dispose();
       if (renderer.domElement.parentElement === container) {
         container.removeChild(renderer.domElement);
       }
+      sceneRefsRef.current = null;
     };
-  }, [engine, project.ornamentSpec.diameterMm]);
+  }, []);
+
+  // Fix #5: drugi useEffect — aktualizuje wyłącznie geometrię/teksturę mesh
+  // przy zmianie projektu. Nie tworzy nowej sceny ani renderer — tylko
+  // podmienia mesh w istniejącej scenie (O(1) koszt aktualizacji).
+  useEffect(() => {
+    const refs = sceneRefsRef.current;
+    if (!refs) return;
+
+    const engine = new ProjectionEngine(project);
+    const result = engine.project2D();
+
+    const texture = new THREE.CanvasTexture(result.textureCanvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+
+    const radius = project.ornamentSpec.diameterMm / 2;
+    const geometry = new THREE.SphereGeometry(radius, 64, 48);
+    const material = new THREE.MeshStandardMaterial({
+      map: texture,
+      roughness: 0.7,
+      metalness: 0.0,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+
+    if (refs.mesh) {
+      refs.scene.remove(refs.mesh);
+      (refs.mesh.material as THREE.MeshStandardMaterial).map?.dispose();
+      (refs.mesh.material as THREE.MeshStandardMaterial).dispose();
+      refs.mesh.geometry.dispose();
+    }
+
+    refs.scene.add(mesh);
+    refs.mesh = mesh;
+  }, [project]);
 
   return (
     <section aria-label="Podgląd 3D" className="viewer-3d">
+      {/* Fix #2: role="img" przywrócone — kontener canvas reprezentuje
+          wizualizację 3D, wymaga opisu dla czytników ekranu */}
       <div
         ref={containerRef}
-        className="viewer-3d__viewport"
-        aria-label="Interaktywny podgląd ornamentu 3D"
+        className="viewer-3d__container"
+        aria-label="Interaktywny podgląd 3D ornamentu — przeciągnij aby obrócić, scroll aby przybliżyć"
+        role="img"
       />
     </section>
   );

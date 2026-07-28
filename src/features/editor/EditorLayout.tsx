@@ -48,19 +48,29 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
     dispatch(setActiveProject(null));
   };
 
-  // Fix #2: try/finally gwarantuje usunięcie <a> z DOM nawet przy wyjątku
+  // Fix #2: canvas.toBlob zamiast synchronicznego toDataURL — nie blokuje
+  // głównego wątku przy dużych canvasach; spójne z wzorcem z ExportPanel
+  // Fix #3: link konfigurowany PRZED appendChild — href i download ustawiane
+  // zanim element trafi do DOM (defensywnie poprawna kolejność)
   const handleExportTexture = () => {
-    const link = document.createElement('a');
-    document.body.appendChild(link);
-    try {
-      const engine = new ProjectionEngine(project);
-      const result = engine.project2D();
-      link.href = result.textureCanvas.toDataURL('image/png');
+    const engine = new ProjectionEngine(project);
+    const result = engine.project2D();
+
+    result.textureCanvas.toBlob((blob) => {
+      if (!blob) return;
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
       link.download = `${project.name}-texture.png`;
-      link.click();
-    } finally {
-      document.body.removeChild(link);
-    }
+      document.body.appendChild(link);
+      try {
+        link.click();
+      } finally {
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }
+    }, 'image/png');
   };
 
   return (

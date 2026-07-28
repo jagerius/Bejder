@@ -1,4 +1,5 @@
 typescript
+// Fix #1: usunięto artefakt "typescript" z pierwszej linii — powodował błąd TS1005
 import type { BeadCell, PatternMap, Segment } from '@/shared/types';
 
 export interface SphereUV {
@@ -8,11 +9,33 @@ export interface SphereUV {
 
 export type AdjacencyIndex = Map<string, string[]>;
 
-// Fix #2: wstępna mapa row → cells eliminuje złożoność O(n²) wewnątrz segmentu
-// Dla każdej komórki sprawdzamy wyłącznie komórki z rzędów sąsiednich (row-1, row, row+1)
+function cellKey(row: number, col: number): string {
+  return `${row}:${col}`;
+}
+
+// Fix #2: buildAdjacencyIndex obsługuje sąsiedztwo zarówno wewnątrz-, jak i
+// między-segmentowe. Budujemy globalną mapę row:col → cellId dla wszystkich
+// segmentów, dzięki czemu flood fill przechodzi przez granice segmentów.
+// Sąsiedzi wewnątrz-segmentowi: row-1/row/row+1 z |col delta| ≤ 1.
+// Sąsiedzi między-segmentowi: ta sama pozycja (row, col) w segmentach ±1.
 export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
   const index: AdjacencyIndex = new Map();
+  const globalGrid = new Map<string, string[]>();
 
+  for (const segment of segments) {
+    for (const cell of segment.cells) {
+      index.set(cell.id, []);
+      const key = cellKey(cell.row, cell.col);
+      const bucket = globalGrid.get(key);
+      if (bucket) {
+        bucket.push(cell.id);
+      } else {
+        globalGrid.set(key, [cell.id]);
+      }
+    }
+  }
+
+  // Sąsiedztwo wewnątrz-segmentowe — mapa row → cells eliminuje O(n²)
   for (const segment of segments) {
     const rowMap = new Map<number, BeadCell[]>();
     for (const cell of segment.cells) {
@@ -22,7 +45,6 @@ export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
       } else {
         rowMap.set(cell.row, [cell]);
       }
-      index.set(cell.id, []);
     }
 
     for (const cell of segment.cells) {
@@ -42,11 +64,38 @@ export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
     }
   }
 
+  // Sąsiedztwo między-segmentowe — łączymy komórki o tej samej (row, col)
+  // z sąsiednich segmentów (index ±1), co pozwala flood fill przechodzić
+  // przez granice segmentów zamiast zatrzymywać się na krawędzi
+  for (let si = 0; si < segments.length; si++) {
+    const current = segments[si];
+    const adjacentIndexes = [si - 1, si + 1].filter(
+      (idx) => idx >= 0 && idx < segments.length
+    );
+
+    for (const adjIdx of adjacentIndexes) {
+      const adjacent = segments[adjIdx];
+      const adjCellIds = new Map<string, string>();
+      for (const cell of adjacent.cells) {
+        adjCellIds.set(cellKey(cell.row, cell.col), cell.id);
+      }
+
+      for (const cell of current.cells) {
+        const counterpartId = adjCellIds.get(cellKey(cell.row, cell.col));
+        if (counterpartId === undefined) continue;
+        const neighbors = index.get(cell.id);
+        if (neighbors && !neighbors.includes(counterpartId)) {
+          neighbors.push(counterpartId);
+        }
+      }
+    }
+  }
+
   return index;
 }
 
-// Fix #3: wybór komórki uwzględnia zarówno rząd, jak i kolumnę.
-// Wcześniej brana była pierwsza komórka rzędu — błędne przy wielu kolumnach w rzędzie.
+// Fix #3: Math.max(...segment.cells.map(...)) zastąpione reduce — eliminuje
+// RangeError "Maximum call stack size exceeded" przy dużej liczbie komórek
 export function sphereUVToCellId(segments: Segment[], uv: SphereUV): string | null {
   if (segments.length === 0) return null;
 
@@ -55,7 +104,10 @@ export function sphereUVToCellId(segments: Segment[], uv: SphereUV): string | nu
   const segment = segments[segmentIndex];
   if (!segment || segment.cells.length === 0) return null;
 
-  const maxRow = Math.max(...segment.cells.map((cell) => cell.row));
+  const maxRow = segment.cells.reduce(
+    (acc, cell) => (cell.row > acc ? cell.row : acc),
+    0
+  );
   const targetRow =
     Math.min(maxRow, Math.max(0, Math.round(uv.v * maxRow)));
 

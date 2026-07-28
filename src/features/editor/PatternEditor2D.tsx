@@ -1,5 +1,4 @@
 tsx
-// Fix #4: usunięto artefakt "tsx" z pierwszej linii — powodował błąd kompilacji TypeScript
 // Fix #1: import React — wymagany dla React.PointerEvent, React.WheelEvent
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '@/app/store';
@@ -238,7 +237,6 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     [dispatch, paintCell, project.patternMap]
   );
 
-  // Fix #5: useCallback na handlePointerMove
   const handlePointerMove = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
       const last = lastPointerRef.current;
@@ -261,7 +259,10 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     [dispatch, paintCell, pan.x, pan.y]
   );
 
-  // Fix #5: useCallback na handlePointerUp
+  // Fix #1: celowe puste [] deps — handler operuje wyłącznie na refach
+  // (isPaintingRef, isPanningRef, lastPointerRef) oraz na setPointerVersion
+  // z functional update, więc nie odczytuje żadnych wartości z closure.
+  // Nie dodawaj deps bez weryfikacji, że handler faktycznie ich potrzebuje.
   const handlePointerUp = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
       event.currentTarget.releasePointerCapture(event.pointerId);
@@ -273,7 +274,6 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     []
   );
 
-  // Fix #5: useCallback na handleWheel
   const handleWheel = useCallback(
     (event: React.WheelEvent<HTMLCanvasElement>) => {
       const nextZoom = clampZoom(zoom * (event.deltaY < 0 ? 1.1 : 0.9));
@@ -282,9 +282,17 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     [dispatch, zoom]
   );
 
+  // Fix #5: nazwany handler zamiast inline arrow — spójny z resztą handlerów,
+  // stabilna referencja zapobiega niepotrzebnym re-renderom
+  const handleContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLCanvasElement>) => {
+      event.preventDefault();
+    },
+    []
+  );
+
   return (
     <section aria-label="Edytor wzoru 2D" className="pattern-editor">
-      {/* Fix #4: aria-label na canvas */}
       <canvas
         ref={canvasRef}
         className="pattern-editor__canvas"
@@ -294,7 +302,7 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
         onWheel={handleWheel}
-        onContextMenu={(event) => event.preventDefault()}
+        onContextMenu={handleContextMenu}
       />
     </section>
   );
