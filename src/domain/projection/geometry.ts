@@ -1,5 +1,4 @@
 typescript
-// Fix #1: usunięto artefakt "typescript" z pierwszej linii — powodował błąd TS1005
 import type { BeadCell, PatternMap, Segment } from '@/shared/types';
 
 export interface SphereUV {
@@ -17,23 +16,10 @@ function cellKey(row: number, col: number): string {
 // między-segmentowe. Budujemy globalną mapę row:col → cellId dla wszystkich
 // segmentów, dzięki czemu flood fill przechodzi przez granice segmentów.
 // Sąsiedzi wewnątrz-segmentowi: row-1/row/row+1 z |col delta| ≤ 1.
-// Sąsiedzi między-segmentowi: ta sama pozycja (row, col) w segmentach ±1.
+// Sąsiedzi między-segmentowi: ta sama pozycja (row, col) w segmentach ±1
+// z wrap-around: segment 0 jest sąsiadem segmentu N-1 (szew ornamentu).
 export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
   const index: AdjacencyIndex = new Map();
-  const globalGrid = new Map<string, string[]>();
-
-  for (const segment of segments) {
-    for (const cell of segment.cells) {
-      index.set(cell.id, []);
-      const key = cellKey(cell.row, cell.col);
-      const bucket = globalGrid.get(key);
-      if (bucket) {
-        bucket.push(cell.id);
-      } else {
-        globalGrid.set(key, [cell.id]);
-      }
-    }
-  }
 
   // Sąsiedztwo wewnątrz-segmentowe — mapa row → cells eliminuje O(n²)
   for (const segment of segments) {
@@ -45,6 +31,7 @@ export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
       } else {
         rowMap.set(cell.row, [cell]);
       }
+      index.set(cell.id, []);
     }
 
     for (const cell of segment.cells) {
@@ -65,13 +52,17 @@ export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
   }
 
   // Sąsiedztwo między-segmentowe — łączymy komórki o tej samej (row, col)
-  // z sąsiednich segmentów (index ±1), co pozwala flood fill przechodzić
-  // przez granice segmentów zamiast zatrzymywać się na krawędzi
-  for (let si = 0; si < segments.length; si++) {
+  // z sąsiednich segmentów. Indeks segmentu liczony modulo N, więc segment
+  // N-1 jest połączony z segmentem 0 (wrap-around na szwie ornamentu).
+  // Fix #3: Set zamiast neighbors.includes() — O(1) dedup zamiast O(n) lookup
+  const n = segments.length;
+  for (let si = 0; si < n; si++) {
     const current = segments[si];
-    const adjacentIndexes = [si - 1, si + 1].filter(
-      (idx) => idx >= 0 && idx < segments.length
-    );
+    // Modulo zapewnia wrap-around: dla si=0 → n-1, dla si=n-1 → 0
+    const adjacentIndexes = [
+      (si - 1 + n) % n,
+      (si + 1) % n,
+    ];
 
     for (const adjIdx of adjacentIndexes) {
       const adjacent = segments[adjIdx];
@@ -83,8 +74,13 @@ export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
       for (const cell of current.cells) {
         const counterpartId = adjCellIds.get(cellKey(cell.row, cell.col));
         if (counterpartId === undefined) continue;
+
         const neighbors = index.get(cell.id);
-        if (neighbors && !neighbors.includes(counterpartId)) {
+        if (!neighbors) continue;
+
+        // Fix #3: tymczasowy Set dla O(1) dedup — budowany raz na komórkę
+        const neighborSet = new Set(neighbors);
+        if (!neighborSet.has(counterpartId)) {
           neighbors.push(counterpartId);
         }
       }

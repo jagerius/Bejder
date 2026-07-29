@@ -18,6 +18,15 @@ interface SceneRefs {
   animationFrameId: number;
 }
 
+// Fix #2: helper do disposal mesha — wywoływany zarówno przy podmianie mesh
+// (drugi useEffect) jak i przy unmount (cleanup pierwszego useEffect)
+function disposeMesh(mesh: THREE.Mesh): void {
+  const material = mesh.material as THREE.MeshStandardMaterial;
+  material.map?.dispose();
+  material.dispose();
+  mesh.geometry.dispose();
+}
+
 export default function Viewer3D({ project }: Viewer3DProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   // Fix #5: scena przechowywana w useRef — tworzona raz, aktualizowana
@@ -42,14 +51,11 @@ export default function Viewer3D({ project }: Viewer3DProps) {
     scene.background = new THREE.Color(0x1a1a2e);
 
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 2000);
-    camera.position.set(0, 0, 220);
 
     // Fix #4: przywrócone OrbitControls — interaktywny obrót i zoom kamery
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
-    controls.minDistance = 50;
-    controls.maxDistance = 800;
 
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     scene.add(ambientLight);
@@ -63,7 +69,9 @@ export default function Viewer3D({ project }: Viewer3DProps) {
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width: w, height: h } = entry.contentRect;
-        if (w === 0 || h === 0) return;
+        // Fix #4: continue zamiast return — pomija zerowe wymiary
+        // bez przerywania przetwarzania pozostałych entries
+        if (w === 0 || h === 0) continue;
         renderer.setSize(w, h);
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
@@ -92,6 +100,13 @@ export default function Viewer3D({ project }: Viewer3DProps) {
       cancelAnimationFrame(refs.animationFrameId);
       resizeObserver.disconnect();
       controls.dispose();
+      // Fix #2: dispose mesh przed zniszczeniem renderer — tekstura i geometria
+      // są zwalniane z pamięci GPU; bez tego przy unmount następował wyciek
+      if (refs.mesh) {
+        scene.remove(refs.mesh);
+        disposeMesh(refs.mesh);
+        refs.mesh = null;
+      }
       renderer.dispose();
       if (renderer.domElement.parentElement === container) {
         container.removeChild(renderer.domElement);
@@ -103,9 +118,19 @@ export default function Viewer3D({ project }: Viewer3DProps) {
   // Fix #5: drugi useEffect — aktualizuje wyłącznie geometrię/teksturę mesh
   // przy zmianie projektu. Nie tworzy nowej sceny ani renderer — tylko
   // podmienia mesh w istniejącej scenie (O(1) koszt aktualizacji).
+  // Fix #3: pozycja kamery i limity zoomu skalowane do diameterMm projektu
   useEffect(() => {
     const refs = sceneRefsRef.current;
     if (!refs) return;
+
+    const radius = project.ornamentSpec.diameterMm / 2;
+
+    // Fix #3: kamera skalowana do rozmiaru ornamentu — sztywne (0,0,220)
+    // było poprawne tylko dla diameterMm ≈ 80 mm; teraz działa dla każdego rozmiaru
+    refs.camera.position.set(0, 0, radius * 3.5);
+    refs.controls.minDistance = radius * 1.2;
+    refs.controls.maxDistance = radius * 8;
+    refs.controls.update();
 
     const engine = new ProjectionEngine(project);
     const result = engine.project2D();
@@ -113,7 +138,6 @@ export default function Viewer3D({ project }: Viewer3DProps) {
     const texture = new THREE.CanvasTexture(result.textureCanvas);
     texture.colorSpace = THREE.SRGBColorSpace;
 
-    const radius = project.ornamentSpec.diameterMm / 2;
     const geometry = new THREE.SphereGeometry(radius, 64, 48);
     const material = new THREE.MeshStandardMaterial({
       map: texture,
@@ -124,9 +148,7 @@ export default function Viewer3D({ project }: Viewer3DProps) {
 
     if (refs.mesh) {
       refs.scene.remove(refs.mesh);
-      (refs.mesh.material as THREE.MeshStandardMaterial).map?.dispose();
-      (refs.mesh.material as THREE.MeshStandardMaterial).dispose();
-      refs.mesh.geometry.dispose();
+      disposeMesh(refs.mesh);
     }
 
     refs.scene.add(mesh);

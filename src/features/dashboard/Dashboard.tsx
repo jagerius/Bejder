@@ -38,7 +38,11 @@ function getUniqueProjectName(
   return candidate;
 }
 
-const ALLOWED_MIME_TYPES = new Set(['application/json', 'text/json', 'text/plain']);
+// Fix #1: text/plain usunięty — był zbyt permisywny (każdy plik tekstowy
+// z rozszerzeniem .json przechodził walidację MIME). Dopuszczamy wyłącznie
+// application/json i text/json; pusty MIME (niektóre OS) traktujemy jako
+// brak informacji i pozwalamy decydować samemu rozszerzeniu.
+const ALLOWED_MIME_TYPES = new Set(['application/json', 'text/json']);
 // Fix #5: maksymalny dozwolony rozmiar pliku importu — 5 MB
 const MAX_IMPORT_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 
@@ -74,21 +78,9 @@ export default function Dashboard() {
     event.target.value = '';
     if (!file) return;
 
-    // Fix #5: limit rozmiaru pliku sprawdzany przed FileReader — zapobiega
-    // wczytaniu bardzo dużych plików (setki MB) do pamięci przez readAsText
-    if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
-      setNotice(null);
-      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-      const limitMb = (MAX_IMPORT_FILE_SIZE_BYTES / (1024 * 1024)).toFixed(0);
-      setImportError(
-        `Plik jest za duży (${sizeMb} MB) — maksymalny rozmiar to ${limitMb} MB.`
-      );
-      return;
-    }
-
-    // Fix #1: walidacja rozszerzenia i MIME scalona w jeden, jednoznaczny warunek.
-    // Pusty file.type jest traktowany jako brak informacji o MIME (niektóre OS
-    // nie raportują typu dla .json) — wtedy decyduje samo rozszerzenie.
+    // Fix #5: walidacja typu pliku PRZED walidacją rozmiaru — komunikat
+    // o nieprawidłowym typie jest ważniejszy diagnostycznie niż rozmiar;
+    // użytkownik dowiaduje się najpierw, że wybrał zły format pliku
     const hasValidExtension = file.name.toLowerCase().endsWith('.json');
     const isMimeAcceptable =
       file.type === '' || ALLOWED_MIME_TYPES.has(file.type);
@@ -97,6 +89,18 @@ export default function Dashboard() {
       setNotice(null);
       setImportError(
         `Nieprawidłowy typ pliku — oczekiwano pliku JSON (.json, application/json). Otrzymano: "${file.name}" (${file.type || 'nieznany MIME'}).`
+      );
+      return;
+    }
+
+    // Fix #5: limit rozmiaru pliku sprawdzany przed FileReader — zapobiega
+    // wczytaniu bardzo dużych plików (setki MB) do pamięci przez readAsText
+    if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
+      setNotice(null);
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+      const limitMb = (MAX_IMPORT_FILE_SIZE_BYTES / (1024 * 1024)).toFixed(0);
+      setImportError(
+        `Plik jest za duży (${sizeMb} MB) — maksymalny rozmiar to ${limitMb} MB.`
       );
       return;
     }

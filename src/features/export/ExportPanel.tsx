@@ -57,35 +57,44 @@ function ensureLineSpace(pdf: jsPDF, cursorY: number, title?: string): number {
   return MARGIN_MM;
 }
 
-// Fix #3: timeout 30 s — jeśli toBlob lub FileReader nie odpowie (np. zawieszony
-// GPU context), Promise jest odrzucany i isExporting resetowany przez finally
-// w handleExportPdf zamiast pozostawać true na zawsze
+// Fix #3: timeout 30 s + flaga settled — jeśli toBlob lub FileReader nie
+// odpowie w limicie czasu, Promise jest odrzucany; callbacki wykonane po
+// timeout są ignorowane (settled = true), więc Promise rozwiązuje się
+// dokładnie raz i isExporting jest zawsze resetowany przez finally
 function canvasToDataURL(canvas: HTMLCanvasElement): Promise<string> {
   return new Promise((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
-      reject(new Error('canvasToDataURL: przekroczono limit czasu (30 s)'));
-    }, CANVAS_TO_DATA_URL_TIMEOUT_MS);
+    let settled = false;
 
-    const cleanup = () => clearTimeout(timeoutId);
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      fn();
+    };
+
+    const timeoutId = setTimeout(() => {
+      settle(() =>
+        reject(new Error('canvasToDataURL: przekroczono limit czasu (30 s)'))
+      );
+    }, CANVAS_TO_DATA_URL_TIMEOUT_MS);
 
     canvas.toBlob((blob) => {
       if (!blob) {
-        cleanup();
-        reject(new Error('toBlob zwrócił null'));
+        settle(() => reject(new Error('toBlob zwrócił null')));
         return;
       }
       const reader = new FileReader();
       reader.onload = () => {
-        cleanup();
-        if (typeof reader.result === 'string') {
-          resolve(reader.result);
-        } else {
-          reject(new Error('FileReader zwrócił nie-string wynik'));
-        }
+        settle(() => {
+          if (typeof reader.result === 'string') {
+            resolve(reader.result);
+          } else {
+            reject(new Error('FileReader zwrócił nie-string wynik'));
+          }
+        });
       };
       reader.onerror = () => {
-        cleanup();
-        reject(reader.error ?? new Error('FileReader błąd'));
+        settle(() => reject(reader.error ?? new Error('FileReader błąd')));
       };
       reader.readAsDataURL(blob);
     }, 'image/png');
@@ -106,6 +115,8 @@ export default function ExportPanel({ project }: ExportPanelProps) {
     [project.palette.colors]
   );
 
+  // Fix #4: invalidColors renderowane w UI jako ostrzeżenie — użytkownik widzi
+  // nieprawidłowe kolory przed kliknięciem eksportu, nie tylko po błędzie
   const invalidColors = useMemo(
     () => paletteWithRgb.filter((color) => color.rgb === null),
     [paletteWithRgb]
@@ -127,9 +138,6 @@ export default function ExportPanel({ project }: ExportPanelProps) {
       }));
   }, [paletteWithRgb, project.patternMap]);
 
-  // Fix #1: przywrócono cellId w rowInstructions — był potrzebny downstream (np. PDF renderer)
-  // Fix #2: wzorzec ?? + set zamiast podwójnego rowMap.get(cell.row) —
-  // jedna operacja lookup na komórkę, spójne z wzorcem z MaterialsPanel
   const rowInstructions = useMemo(() => {
     const rowMap = new Map<number, { cellId: string; colorHex: string; colorName: string }[]>();
     for (const segment of project.segments) {
@@ -158,101 +166,103 @@ export default function ExportPanel({ project }: ExportPanelProps) {
       return;
     }
 
-    setIsExporting(true);
     setExportError(null);
+    setIsExporting(true);
 
     try {
       const engine = new ProjectionEngine(project);
-      const result = engine.project2D();
-      const image = await canvasToDataURL(result.textureCanvas);
+      const { textureCanvas } = engine.project2D();
+      const textureDataUrl = await canvasToDataURL(textureCanvas);
 
       const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+
       pdf.setFontSize(16);
-      pdf.text(project.name, MARGIN_MM, 16);
+      pdf.text(`Instrukcja ornamentu — ${project.name}`, MARGIN_MM, MARGIN_MM + 4);
+
       pdf.setFontSize(10);
       pdf.text(
-        `Średnica: ${project.ornamentSpec.diameterMm} mm · Segmenty: ${project.ornamentSpec.segmentCount} · Rzędy: ${project.ornamentSpec.segmentRows}`,
+        `Średnica: ${project.ornamentSpec.diameterMm} mm | Segmenty: ${project.ornamentSpec.segmentCount} | Rzędy: ${project.ornamentSpec.segmentRows}`,
         MARGIN_MM,
-        24
+        MARGIN_MM + 12
       );
-      pdf.addImage(image, 'PNG', MARGIN_MM, 32, PAGE_WIDTH_MM - 2 * MARGIN_MM, 134.5);
 
-      let cursorY = ensureLineSpace(pdf, 176, 'Lista materiałów (BOM)');
+      const imgWidth = PAGE_WIDTH_MM - 2 * MARGIN_MM;
+      const imgHeight = (textureCanvas.height / textureCanvas.width) * imgWidth;
+      pdf.addImage(textureDataUrl, 'PNG', MARGIN_MM, MARGIN_MM + 18, imgWidth, imgHeight);
+
+      pdf.addPage('a4', 'landscape');
       pdf.setFontSize(12);
-      pdf.text('Lista materiałów (BOM)', MARGIN_MM, cursorY);
-      cursorY += LINE_HEIGHT_MM;
-      pdf.setFontSize(10);
+      pdf.text('Lista materiałów (BOM)', MARGIN_MM, MARGIN_MM + 2);
+
+      let cursorY = MARGIN_MM + LINE_HEIGHT_MM + 4;
       for (const entry of bomEntries) {
         cursorY = ensureLineSpace(pdf, cursorY, 'Lista materiałów (BOM) — cd.');
         pdf.setFillColor(entry.rgb.r, entry.rgb.g, entry.rgb.b);
-        pdf.rect(MARGIN_MM, cursorY - 4, 6, 6, 'F');
-        pdf.setTextColor(30, 30, 30);
-        pdf.text(`${entry.name} (${entry.hex}) — ${entry.count} szt.`, MARGIN_MM + 10, cursorY);
+        pdf.rect(MARGIN_MM, cursorY - 3, 5, 5, 'F');
+        pdf.setFontSize(10);
+        pdf.text(
+          `${entry.name} (${entry.hex}) — ${entry.count} szt.`,
+          MARGIN_MM + 8,
+          cursorY
+        );
         cursorY += LINE_HEIGHT_MM;
       }
 
-      cursorY = ensureLineSpace(pdf, cursorY + LINE_HEIGHT_MM, 'Schemat rzędów');
+      pdf.addPage('a4', 'landscape');
       pdf.setFontSize(12);
-      pdf.text('Schemat rzędów', MARGIN_MM, cursorY);
-      cursorY += LINE_HEIGHT_MM;
-      pdf.setFontSize(9);
-      for (const [row, cells] of rowInstructions) {
-        cursorY = ensureLineSpace(pdf, cursorY, 'Schemat rzędów — cd.');
-        pdf.setTextColor(30, 30, 30);
-        pdf.text(`Rząd ${row + 1}:`, MARGIN_MM, cursorY);
-        let cellX = MARGIN_MM + 22;
-        for (const cell of cells) {
-          const rgb = hexToRgb(cell.colorHex);
-          if (rgb) {
-            pdf.setFillColor(rgb.r, rgb.g, rgb.b);
-            pdf.rect(cellX, cursorY - 3.5, 5, 5, 'F');
-          }
-          pdf.setTextColor(60, 60, 60);
-          pdf.text(cell.colorName.slice(0, 6), cellX + 6, cursorY);
-          cellX += 26;
-          if (cellX > PAGE_WIDTH_MM - MARGIN_MM - 30) {
-            cellX = MARGIN_MM + 22;
-            cursorY += LINE_HEIGHT_MM;
-            cursorY = ensureLineSpace(pdf, cursorY, 'Schemat rzędów — cd.');
-          }
-        }
-        cursorY += LINE_HEIGHT_MM + 2;
+      pdf.text('Instrukcja koralikowania rzędami', MARGIN_MM, MARGIN_MM + 2);
+
+      cursorY = MARGIN_MM + LINE_HEIGHT_MM + 4;
+      for (const [rowNum, cells] of rowInstructions) {
+        cursorY = ensureLineSpace(pdf, cursorY, 'Instrukcja koralikowania — cd.');
+        pdf.setFontSize(10);
+        pdf.text(
+          `Rząd ${rowNum}: ${cells.map((c) => c.colorName).join(', ')}`,
+          MARGIN_MM,
+          cursorY
+        );
+        cursorY += LINE_HEIGHT_MM;
       }
 
-      pdf.save(`${project.name}.pdf`);
+      pdf.save(`${project.name}-instrukcja.pdf`);
     } catch (error) {
-      console.error('[ExportPanel] Eksport PDF nie powiódł się:', error);
-      setExportError('Eksport PDF nie powiódł się.');
+      setExportError(
+        `Nie udało się wyeksportować PDF: ${error instanceof Error ? error.message : 'nieznany błąd'}`
+      );
     } finally {
       setIsExporting(false);
     }
-  }, [project, invalidColors, bomEntries, rowInstructions]);
+  }, [bomEntries, invalidColors, project, rowInstructions]);
 
   const handleExportJson = useCallback(() => {
-    setIsExporting(true);
     setExportError(null);
     try {
       downloadProjectJSON(project);
     } catch (error) {
-      console.error('[ExportPanel] Eksport JSON nie powiódł się:', error);
-      setExportError('Eksport JSON nie powiódł się.');
-    } finally {
-      setIsExporting(false);
+      setExportError(
+        `Nie udało się wyeksportować JSON: ${error instanceof Error ? error.message : 'nieznany błąd'}`
+      );
     }
   }, [project]);
 
   return (
-    <section aria-label="Panel eksportu" className="export-panel">
+    <section aria-label="Eksport projektu" className="export-panel">
       <h2>Eksport</h2>
 
-      <div className="export-panel__actions">
-        <button type="button" onClick={handleExportPdf} disabled={isExporting}>
-          {isExporting ? 'Eksportowanie…' : 'Eksportuj PDF'}
-        </button>
-        <button type="button" onClick={handleExportJson} disabled={isExporting}>
-          {isExporting ? 'Eksportowanie…' : 'Eksportuj JSON'}
-        </button>
-      </div>
+      {/* Fix #4: ostrzeżenie o nieprawidłowych kolorach renderowane w UI
+          zanim użytkownik kliknie eksport — nie tylko po błędzie */}
+      {invalidColors.length > 0 ? (
+        <div role="alert" className="export-panel__warning">
+          <strong>Nieprawidłowe kolory w palecie:</strong>
+          <ul>
+            {invalidColors.map((color) => (
+              <li key={color.id}>
+                {color.name} — nieprawidłowy HEX: <code>{color.hex}</code>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {exportError ? (
         <p role="alert" className="export-panel__error">
@@ -260,19 +270,41 @@ export default function ExportPanel({ project }: ExportPanelProps) {
         </p>
       ) : null}
 
-      <section aria-label="Lista materiałów">
-        <h3>Lista materiałów (BOM)</h3>
-        <ul>
-          {bomEntries.map((entry) => (
-            <li key={entry.colorId}>
-              <span
-                aria-hidden="true"
-                style={{ backgroundColor: entry.hex, display: 'inline-block', width: 12, height: 12, borderRadius: 2, marginRight: 6 }}
-              />
-              {entry.name} ({entry.hex}) — {entry.count} szt.
-            </li>
-          ))}
-        </ul>
+      <div className="export-panel__actions">
+        <button
+          type="button"
+          disabled={isExporting}
+          onClick={handleExportPdf}
+        >
+          {isExporting ? 'Generowanie PDF…' : 'Eksportuj PDF (instrukcja)'}
+        </button>
+        <button type="button" onClick={handleExportJson}>
+          Eksportuj JSON (projekt)
+        </button>
+      </div>
+
+      <section aria-label="Lista materiałów" className="export-panel__bom">
+        <h3>Lista materiałów</h3>
+        {bomEntries.length === 0 ? (
+          <p>Brak pomalowanych komórek.</p>
+        ) : (
+          <ul>
+            {bomEntries.map((entry) => (
+              <li key={entry.colorId} className="export-panel__bom-item">
+                {/* Fix #5: klasa CSS zamiast inline style — kolor przekazywany
+                    przez CSS custom property --swatch-color ustawiane w stylesheetcie */}
+                <span
+                  className="export-panel__swatch"
+                  style={{ '--swatch-color': entry.hex } as React.CSSProperties}
+                  aria-hidden="true"
+                />
+                <span>{entry.name}</span>
+                <span>{entry.hex}</span>
+                <span>{entry.count} szt.</span>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
     </section>
   );

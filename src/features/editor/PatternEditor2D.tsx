@@ -219,7 +219,8 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     [dispatch, findCellAtPoint, project.patternMap, project.projectId, selectedColorId]
   );
 
-  // Fix #5: wszystkie handlery zdarzeń canvasu opakowane w useCallback
+  // Fix #5: pushHistory dispatchowany dopiero po weryfikacji trafienia —
+  // kliknięcie poza komórką nie zapisuje wpisu w historii
   const handlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -230,11 +231,14 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
         return;
       }
 
+      const hit = findCellAtPoint(event.clientX, event.clientY);
+      if (!hit) return;
+
       dispatch(pushHistory(project.patternMap));
       isPaintingRef.current = true;
       paintCell(event.clientX, event.clientY);
     },
-    [dispatch, paintCell, project.patternMap]
+    [dispatch, findCellAtPoint, paintCell, project.patternMap]
   );
 
   const handlePointerMove = useCallback(
@@ -274,8 +278,12 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     []
   );
 
+  // Fix #2: event.preventDefault() — zapobiega jednoczesnemu scrollowi strony
+  // przy zoomie kółkiem myszy. React 17+ rejestruje onWheel jako nie-passive,
+  // więc preventDefault działa poprawnie.
   const handleWheel = useCallback(
     (event: React.WheelEvent<HTMLCanvasElement>) => {
+      event.preventDefault();
       const nextZoom = clampZoom(zoom * (event.deltaY < 0 ? 1.1 : 0.9));
       dispatch(setEditorZoom(nextZoom));
     },
@@ -301,6 +309,7 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
+        onPointerLeave={handlePointerUp}
         onWheel={handleWheel}
         onContextMenu={handleContextMenu}
       />

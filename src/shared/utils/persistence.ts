@@ -99,6 +99,23 @@ function openDatabase(): Promise<IDBDatabase> {
         );
       };
 
+      // Fix #1: db.onerror — martwe połączenie (np. przeglądarka zabiła bazę,
+      // IndexedDB quota exceeded, błąd dysku) resetuje singleton i zamyka db.
+      // Bez tego każda kolejna operacja rzucałaby ten sam InvalidStateError
+      // bez możliwości retry. Po resecie kolejne wywołanie openDatabase()
+      // otwiera świeże połączenie.
+      db.onerror = () => {
+        dbPromise = null;
+        try {
+          db.close();
+        } catch {
+          // db może być już zamknięte — ignorujemy
+        }
+        console.warn(
+          '[persistence] IndexedDB: połączenie zakończyło się błędem — singleton zresetowany.'
+        );
+      };
+
       resolve(db);
     };
 
@@ -116,7 +133,8 @@ function openDatabase(): Promise<IDBDatabase> {
 // oncomplete gwarantuje, że wszystkie operacje w transakcji są zatwierdzone
 // (flush do dysku). request.onsuccess dla readwrite oznacza jedynie, że
 // request zakończył się bez błędu, ale transakcja może jeszcze być w toku.
-// result przechwytywany jest w request.onsuccess dla operacji readonly.
+// Fix #5: resultSet flag — jeśli executor nie wywoła setResult przed
+// oncomplete, rzucamy TypeError zamiast resolve(undefined) bez gwarancji typu
 function runTransaction<T>(
   db: IDBDatabase,
   mode: IDBTransactionMode,
@@ -127,18 +145,56 @@ function runTransaction<T>(
   ) => void
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const transaction = db.transaction(IDB_STORE_NAME, mode);
+    // Fix #1: db.transaction() może synchronicznie rzucić InvalidStateError
+    // gdy połączenie jest martwe (np. po db.onerror powyżej). Resetujemy
+    // singleton, żeby kolejne wywołanie openDatabase() otworzyło nowe
+    // połączenie zamiast wielokrotnie rzucać ten sam błąd.
+    let transaction: IDBTransaction;
+    try {
+      transaction = db.transaction(IDB_STORE_NAME, mode);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'InvalidStateError') {
+        dbPromise = null;
+        reject(
+          new Error(
+            '[persistence] Połączenie IndexedDB jest nieaktywne — spróbuj ponownie.'
+          )
+        );
+        return;
+      }
+      reject(error);
+      return;
+    }
+
     const store = transaction.objectStore(IDB_STORE_NAME);
 
     let result: T;
+    let resultSet = false;
 
-    transaction.oncomplete = () => resolve(result);
+    transaction.oncomplete = () => {
+      if (!resultSet) {
+        reject(
+          new TypeError(
+            '[persistence] runTransaction: executor nie wywołał setResult przed oncomplete'
+          )
+        );
+        return;
+      }
+      resolve(result);
+    };
     transaction.onerror = () =>
       reject(transaction.error ?? new Error('Błąd transakcji IndexedDB'));
     transaction.onabort = () =>
       reject(transaction.error ?? new Error('Transakcja IndexedDB została przerwana'));
 
-    executor(store, (value) => { result = value; }, reject);
+    executor(
+      store,
+      (value) => {
+        result = value;
+        resultSet = true;
+      },
+      reject
+    );
   });
 }
 

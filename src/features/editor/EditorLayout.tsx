@@ -33,6 +33,9 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
     state.projects.projects.find((entry) => entry.projectId === projectId)
   );
   const [activeTab, setActiveTab] = useState<TabId>('pattern');
+  // Fix #2: stan błędu eksportu tekstury — wyświetlany użytkownikowi
+  // zamiast cichego return przy toBlob === null
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!project) {
@@ -50,14 +53,28 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
 
   // Fix #2: canvas.toBlob zamiast synchronicznego toDataURL — nie blokuje
   // głównego wątku przy dużych canvasach; spójne z wzorcem z ExportPanel
-  // Fix #3: link konfigurowany PRZED appendChild — href i download ustawiane
-  // zanim element trafi do DOM (defensywnie poprawna kolejność)
+  // Fix #3: try/catch wokół engine.project2D() — unhandled exception
+  // zastąpiony komunikatem błędu wyświetlanym użytkownikowi
   const handleExportTexture = () => {
-    const engine = new ProjectionEngine(project);
-    const result = engine.project2D();
+    setExportError(null);
+
+    let result;
+    try {
+      const engine = new ProjectionEngine(project);
+      result = engine.project2D();
+    } catch (error) {
+      setExportError(
+        `Nie udało się wygenerować tekstury: ${error instanceof Error ? error.message : 'nieznany błąd'}`
+      );
+      return;
+    }
 
     result.textureCanvas.toBlob((blob) => {
-      if (!blob) return;
+      // Fix #2: null blob → komunikat błędu zamiast cichego return
+      if (!blob) {
+        setExportError('Nie udało się wygenerować pliku PNG — canvas zwrócił pusty wynik.');
+        return;
+      }
 
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -84,6 +101,12 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
           Eksportuj teksturę PNG
         </button>
       </header>
+
+      {exportError ? (
+        <p role="alert" className="editor-layout__error">
+          {exportError}
+        </p>
+      ) : null}
 
       <section aria-label="Parametry ornamentu">
         <dl>
