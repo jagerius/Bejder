@@ -21,6 +21,19 @@ function cellKey(row: number, col: number): string {
 export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
   const index: AdjacencyIndex = new Map();
 
+  // Fix #2 (poprawka): jedna globalna mapa Set per komórka — trzymana przez
+  // całą budowę indeksu, dzięki czemu dedup jest faktycznie O(1) przy każdym
+  // dodawaniu sąsiada, bez kosztu tworzenia nowego Set per komórka.
+  const neighborSets = new Map<string, Set<string>>();
+
+  const addNeighbor = (cellId: string, neighborId: string): void => {
+    const set = neighborSets.get(cellId);
+    if (!set) return;
+    if (set.has(neighborId)) return;
+    set.add(neighborId);
+    index.get(cellId)?.push(neighborId);
+  };
+
   // Sąsiedztwo wewnątrz-segmentowe — mapa row → cells eliminuje O(n²)
   for (const segment of segments) {
     const rowMap = new Map<number, BeadCell[]>();
@@ -32,19 +45,17 @@ export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
         rowMap.set(cell.row, [cell]);
       }
       index.set(cell.id, []);
+      neighborSets.set(cell.id, new Set());
     }
 
     for (const cell of segment.cells) {
-      const neighbors = index.get(cell.id);
-      if (!neighbors) continue;
-
       for (let row = cell.row - 1; row <= cell.row + 1; row++) {
         const candidates = rowMap.get(row);
         if (!candidates) continue;
         for (const candidate of candidates) {
           if (candidate.id === cell.id) continue;
           if (Math.abs(candidate.col - cell.col) <= 1) {
-            neighbors.push(candidate.id);
+            addNeighbor(cell.id, candidate.id);
           }
         }
       }
@@ -54,7 +65,8 @@ export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
   // Sąsiedztwo między-segmentowe — łączymy komórki o tej samej (row, col)
   // z sąsiednich segmentów. Indeks segmentu liczony modulo N, więc segment
   // N-1 jest połączony z segmentem 0 (wrap-around na szwie ornamentu).
-  // Fix #3: Set zamiast neighbors.includes() — O(1) dedup zamiast O(n) lookup
+  // Fix #3: globalny neighborSets — O(1) dedup przy dodawaniu sąsiada,
+  // bez kosztu budowania tymczasowego Set per komórka.
   const n = segments.length;
   for (let si = 0; si < n; si++) {
     const current = segments[si];
@@ -74,15 +86,7 @@ export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
       for (const cell of current.cells) {
         const counterpartId = adjCellIds.get(cellKey(cell.row, cell.col));
         if (counterpartId === undefined) continue;
-
-        const neighbors = index.get(cell.id);
-        if (!neighbors) continue;
-
-        // Fix #3: tymczasowy Set dla O(1) dedup — budowany raz na komórkę
-        const neighborSet = new Set(neighbors);
-        if (!neighborSet.has(counterpartId)) {
-          neighbors.push(counterpartId);
-        }
+        addNeighbor(cell.id, counterpartId);
       }
     }
   }

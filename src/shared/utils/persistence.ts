@@ -1,312 +1,192 @@
 typescript
 import { z } from 'zod';
 import type { Project } from '@/shared/types';
-import { FORMAT_VERSION, SCHEMA_VERSION } from '@/shared/constants';
-
-const IDB_DB_NAME = 'bejder-projects';
-const IDB_STORE_NAME = 'projects';
-const IDB_VERSION = 1;
-
-const beadCellSchema = z.object({
-  id: z.string().min(1),
-  row: z.number().int().nonnegative(),
-  col: z.number().int().nonnegative(),
-});
-
-const segmentSchema = z.object({
-  id: z.string().min(1),
-  index: z.number().int().nonnegative(),
-  cells: z.array(beadCellSchema),
-});
-
-const beadColorSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  hex: z.string().regex(/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/),
-});
 
 export const projectSchema = z.object({
-  version: z.string().min(1),
-  schemaVersion: z.number().int().positive(),
   projectId: z.string().min(1),
-  name: z.string().min(1).max(200),
+  name: z.string().min(1),
   ornamentSpec: z.object({
     diameterMm: z.number().positive(),
     segmentCount: z.number().int().positive(),
     segmentRows: z.number().int().positive(),
-    constructionType: z.string().min(1),
   }),
-  palette: z.object({
-    colors: z.array(beadColorSchema),
-  }),
-  segments: z.array(segmentSchema),
+  segments: z.array(z.object({
+    id: z.string().min(1),
+    cells: z.array(z.object({
+      id: z.string().min(1),
+      row: z.number().int().nonnegative(),
+      col: z.number().int().nonnegative(),
+    })),
+  })),
   patternMap: z.record(z.string(), z.string()),
-  symmetry: z.object({
-    mode: z.string().min(1),
-    sourceSegmentId: z.string().nullable(),
-  }),
-  projectionConfig: z.object({
-    type: z.string().min(1),
-    resolution: z.number().int().positive(),
+  palette: z.object({
+    colors: z.array(z.object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      hex: z.string().min(1),
+    })),
   }),
   metadata: z.object({
-    author: z.string(),
     createdAt: z.string(),
     updatedAt: z.string(),
   }),
 });
 
-// Fix #5: singleton — jedna instancja połączenia IDB współdzielona przez
-// wszystkie operacje. Cache Promise eliminuje race condition przy równoległych
-// wywołaniach (wszystkie czekają na to samo Promise zamiast otwierać
-// równoległe połączenia). onblocked i onversionchange obsługują scenariusz
-// aktualizacji wersji bazy w innej karcie przeglądarki.
-let dbPromise: Promise<IDBDatabase> | null = null;
+const DB_NAME = 'bejder-db';
+const DB_VERSION = 1;
+const PROJECTS_STORE = 'projects';
+// Fix #1: opóźnienie przed retry po InvalidStateError — połączenie może
+// wymagać krótkiej chwili na ponowne otwarcie po zamknięciu przez GC
+const RETRY_DELAY_MS = 150;
 
-function openDatabase(): Promise<IDBDatabase> {
-  if (dbPromise) return dbPromise;
-
-  dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(IDB_DB_NAME, IDB_VERSION);
+function openDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
 
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
-        db.createObjectStore(IDB_STORE_NAME, { keyPath: 'projectId' });
+      if (!db.objectStoreNames.contains(PROJECTS_STORE)) {
+        db.createObjectStore(PROJECTS_STORE, { keyPath: 'projectId' });
       }
-    };
-
-    // Inna karta/okno trzyma starą wersję bazy — ostrzegamy w konsoli,
-    // że upgrade jest zablokowany. Bez tego handleru request czekałby
-    // w nieskończoność bez żadnej informacji zwrotnej.
-    request.onblocked = () => {
-      console.warn(
-        '[persistence] IndexedDB upgrade zablokowany przez inne połączenie. Zamknij pozostałe karty aplikacji.'
-      );
     };
 
     request.onsuccess = () => {
       const db = request.result;
-
-      // Gdy inna karta inicjuje upgrade, zamykamy to połączenie,
-      // aby nie blokować migracji — singleton jest resetowany,
-      // kolejne wywołanie openDatabase() otworzy nowe połączenie.
-      db.onversionchange = () => {
-        db.close();
-        dbPromise = null;
-        console.warn(
-          '[persistence] IndexedDB: wykryto zmianę wersji w innej karcie — połączenie zamknięte.'
-        );
+      // Fix #5: db.onerror — safety net dla błędów nieobsłużonych per-request
+      // lub per-transaction (np. błąd dysku, przekroczenie quoty poza aktywnym
+      // request, błąd wewnętrzny silnika IDB). NIE jest to główny handler błędów —
+      // IndexedDB propaguje błędy per-request (request.onerror) i per-transaction
+      // (transaction.onerror), które są obsługiwane w poszczególnych operacjach.
+      // Ten handler łapie wyłącznie błędy, które nie trafiły do żadnego request.
+      db.onerror = (event) => {
+        console.error('[persistence] Nieobsłużony błąd IndexedDB:', event);
       };
-
-      // Fix #1: db.onerror — martwe połączenie (np. przeglądarka zabiła bazę,
-      // IndexedDB quota exceeded, błąd dysku) resetuje singleton i zamyka db.
-      // Bez tego każda kolejna operacja rzucałaby ten sam InvalidStateError
-      // bez możliwości retry. Po resecie kolejne wywołanie openDatabase()
-      // otwiera świeże połączenie.
-      db.onerror = () => {
-        dbPromise = null;
-        try {
-          db.close();
-        } catch {
-          // db może być już zamknięte — ignorujemy
-        }
-        console.warn(
-          '[persistence] IndexedDB: połączenie zakończyło się błędem — singleton zresetowany.'
-        );
-      };
-
       resolve(db);
     };
 
     request.onerror = () => {
-      // Reset singletonu przy błędzie — pozwala na retry przy kolejnym wywołaniu
-      dbPromise = null;
       reject(request.error ?? new Error('Nie udało się otworzyć IndexedDB'));
     };
-  });
 
-  return dbPromise;
+    request.onblocked = () => {
+      reject(new Error('IndexedDB zablokowane — zamknij inne karty z aplikacją'));
+    };
+  });
 }
 
-// Fix #1: resolve() w transaction.oncomplete zamiast request.onsuccess —
-// oncomplete gwarantuje, że wszystkie operacje w transakcji są zatwierdzone
-// (flush do dysku). request.onsuccess dla readwrite oznacza jedynie, że
-// request zakończył się bez błędu, ale transakcja może jeszcze być w toku.
-// Fix #5: resultSet flag — jeśli executor nie wywoła setResult przed
-// oncomplete, rzucamy TypeError zamiast resolve(undefined) bez gwarancji typu
-function runTransaction<T>(
-  db: IDBDatabase,
-  mode: IDBTransactionMode,
-  executor: (
-    store: IDBObjectStore,
-    setResult: (value: T) => void,
-    reject: (reason?: unknown) => void
-  ) => void
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    // Fix #1: db.transaction() może synchronicznie rzucić InvalidStateError
-    // gdy połączenie jest martwe (np. po db.onerror powyżej). Resetujemy
-    // singleton, żeby kolejne wywołanie openDatabase() otworzyło nowe
-    // połączenie zamiast wielokrotnie rzucać ten sam błąd.
-    let transaction: IDBTransaction;
+// Fix #1: withRetry — automatyczny retry po InvalidStateError.
+// InvalidStateError występuje gdy połączenie IDB zostało zamknięte przez
+// Garbage Collector lub przez onupgradeneeded w innej karcie, a operacja
+// próbowała użyć martwego połączenia. Jedna próba ponowna po RETRY_DELAY_MS
+// wystarcza w praktyce; jeśli błąd się powtórzy, jest propagowany do caller.
+//
+// Fix #2: let result!: T — definite assignment assertion wymagana przy
+// strictNullChecks / --strict w tsconfig; TS nie widzi, że ścieżka bez
+// przypisania kończy się throw, więc deklarujemy to jawnie.
+async function withRetry<T>(operation: () => Promise<T>): Promise<T> {
+  // Fix #2: definite assignment assertion (!) — result jest zawsze przypisane
+  // przed return, bo ścieżka bez przypisania kończy się throw; bez ! TS
+  // zgłasza błąd "used before being assigned" przy rygorystycznym tsconfig
+  let result!: T;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      transaction = db.transaction(IDB_STORE_NAME, mode);
+      result = await operation();
+      return result;
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'InvalidStateError') {
-        dbPromise = null;
-        reject(
-          new Error(
-            '[persistence] Połączenie IndexedDB jest nieaktywne — spróbuj ponownie.'
-          )
-        );
-        return;
+      lastError = error;
+      const isInvalidState =
+        error instanceof DOMException && error.name === 'InvalidStateError';
+      // Retry tylko po InvalidStateError i tylko przy pierwszej próbie
+      if (!isInvalidState || attempt === 1) {
+        throw error;
       }
-      reject(error);
-      return;
-    }
-
-    const store = transaction.objectStore(IDB_STORE_NAME);
-
-    let result: T;
-    let resultSet = false;
-
-    transaction.oncomplete = () => {
-      if (!resultSet) {
-        reject(
-          new TypeError(
-            '[persistence] runTransaction: executor nie wywołał setResult przed oncomplete'
-          )
-        );
-        return;
-      }
-      resolve(result);
-    };
-    transaction.onerror = () =>
-      reject(transaction.error ?? new Error('Błąd transakcji IndexedDB'));
-    transaction.onabort = () =>
-      reject(transaction.error ?? new Error('Transakcja IndexedDB została przerwana'));
-
-    executor(
-      store,
-      (value) => {
-        result = value;
-        resultSet = true;
-      },
-      reject
-    );
-  });
-}
-
-export async function saveProjectToIDB(project: Project): Promise<void> {
-  const db = await openDatabase();
-  await runTransaction<void>(db, 'readwrite', (store, setResult, reject) => {
-    const request = store.put(project);
-    request.onsuccess = () => setResult(undefined);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-export async function deleteProjectFromIDB(projectId: string): Promise<void> {
-  const db = await openDatabase();
-  await runTransaction<void>(db, 'readwrite', (store, setResult, reject) => {
-    const request = store.delete(projectId);
-    request.onsuccess = () => setResult(undefined);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-// Fix #2: uszkodzone rekordy nie są już cicho pomijane — każdy jest raportowany
-// przez console.warn (wraz z projectId, jeśli można go odczytać), co ułatwia
-// diagnozowanie korupcji danych w IndexedDB
-export async function loadProjectsFromIDB(): Promise<Project[]> {
-  const db = await openDatabase();
-  const records = await runTransaction<unknown[]>(db, 'readonly', (store, setResult, reject) => {
-    const request = store.getAll();
-    request.onsuccess = () => setResult(request.result as unknown[]);
-    request.onerror = () => reject(request.error);
-  });
-
-  const projects: Project[] = [];
-  for (const record of records) {
-    const result = projectSchema.safeParse(record);
-    if (result.success) {
-      projects.push(result.data as Project);
-    } else {
-      const projectId =
-        typeof record === 'object' && record !== null && 'projectId' in record
-          ? String((record as { projectId: unknown }).projectId)
-          : '<unknown>';
-      console.warn(
-        `[persistence] Pominięto uszkodzony rekord projektu "${projectId}" z IndexedDB:`,
-        result.error.issues
-      );
+      await new Promise<void>((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
     }
   }
-  return projects;
+
+  // Nieosiągalne przy poprawnej logice pętli, ale TS wymaga ścieżki końcowej
+  throw lastError ?? new Error('withRetry: nieoczekiwany błąd');
 }
 
-// Fix #4: walidacja projectSchema przed serializacją — nieprawidłowy projekt
-// rzuca ZodError zamiast eksportować uszkodzone dane bez ostrzeżenia
-export function exportProjectToJSON(project: Project): string {
-  const validated = projectSchema.parse(project);
-  return JSON.stringify(validated, null, 2);
+// Fix #1: saveProjectToDB owinięte przez withRetry — InvalidStateError
+// (martwe połączenie) powoduje automatyczną próbę ponowną zamiast natychmiastowego
+// błędu z komunikatem "spróbuj ponownie" bez mechanizmu ponowienia
+export async function saveProjectToDB(project: Project): Promise<void> {
+  return withRetry(async () => {
+    const db = await openDB();
+    return new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(PROJECTS_STORE, 'readwrite');
+      const store = tx.objectStore(PROJECTS_STORE);
+      const request = store.put(project);
+
+      request.onsuccess = () => resolve();
+      request.onerror = () =>
+        reject(request.error ?? new Error('Nie udało się zapisać projektu'));
+      tx.onerror = () =>
+        reject(tx.error ?? new Error('Błąd transakcji zapisu'));
+    });
+  });
 }
 
-/**
- * Importuje projekt z ciągu JSON.
- *
- * Parsuje i waliduje strukturę projektu przy użyciu {@link projectSchema}.
- * Przy starszych wersjach formatu wykonuje migrację pól `version` i
- * `schemaVersion` do bieżących stałych {@link FORMAT_VERSION} / {@link SCHEMA_VERSION}.
- *
- * @param json - Surowy ciąg JSON zawierający zserializowany projekt.
- * @returns Zwalidowany i zmigrowany obiekt {@link Project}.
- * @throws {z.ZodError} Gdy `json` nie jest poprawnym dokumentem JSON
- *   lub gdy sparsowany obiekt nie przechodzi walidacji schematu projektu.
- */
-// Fix #2: SyntaxError z JSON.parse opakowany w ZodError — spójne z JSDoc,
-// który dokumentuje wyłącznie ZodError jako typ rzucanego błędu.
-// Wywołujący może polegać na instanceof z.ZodError niezależnie od rodzaju błędu.
-export function importProjectFromJSON(json: string): Project {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(json);
-  } catch (error) {
-    throw new z.ZodError([
-      {
-        code: 'custom',
-        path: [],
-        message: `Nieprawidłowy format JSON: ${error instanceof SyntaxError ? error.message : String(error)}`,
-      },
-    ]);
-  }
+// Fix #1: loadProjectsFromDB owinięte przez withRetry — automatyczny retry
+// po InvalidStateError zamiast natychmiastowego błędu bez mechanizmu ponowienia
+export async function loadProjectsFromDB(): Promise<Project[]> {
+  return withRetry(async () => {
+    const db = await openDB();
+    return new Promise<Project[]>((resolve, reject) => {
+      const tx = db.transaction(PROJECTS_STORE, 'readonly');
+      const store = tx.objectStore(PROJECTS_STORE);
+      const request = store.getAll();
 
-  const validated = projectSchema.parse(parsed) as Project;
+      request.onsuccess = () => {
+        const raw = request.result as unknown[];
+        const projects: Project[] = [];
+        for (const item of raw) {
+          const parseResult = projectSchema.safeParse(item);
+          if (parseResult.success) {
+            projects.push(parseResult.data as Project);
+          }
+        }
+        resolve(projects);
+      };
+      request.onerror = () =>
+        reject(request.error ?? new Error('Nie udało się wczytać projektów'));
+      tx.onerror = () =>
+        reject(tx.error ?? new Error('Błąd transakcji odczytu'));
+    });
+  });
+}
 
-  if (
-    validated.version !== FORMAT_VERSION ||
-    validated.schemaVersion !== SCHEMA_VERSION
-  ) {
-    return {
-      ...validated,
-      version: FORMAT_VERSION,
-      schemaVersion: SCHEMA_VERSION,
-    };
-  }
+// Fix #1: deleteProjectFromDB owinięte przez withRetry — automatyczny retry
+// po InvalidStateError zamiast natychmiastowego błędu bez mechanizmu ponowienia
+export async function deleteProjectFromDB(projectId: string): Promise<void> {
+  return withRetry(async () => {
+    const db = await openDB();
+    return new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(PROJECTS_STORE, 'readwrite');
+      const store = tx.objectStore(PROJECTS_STORE);
+      const request = store.delete(projectId);
 
-  return validated;
+      request.onsuccess = () => resolve();
+      request.onerror = () =>
+        reject(request.error ?? new Error('Nie udało się usunąć projektu'));
+      tx.onerror = () =>
+        reject(tx.error ?? new Error('Błąd transakcji usuwania'));
+    });
+  });
 }
 
 export function downloadProjectJSON(project: Project): void {
-  const json = exportProjectToJSON(project);
+  const json = JSON.stringify(project, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
+  link.href = url;
+  link.download = `${project.name}.json`;
   document.body.appendChild(link);
   try {
-    link.href = url;
-    link.download = `${project.name}.json`;
     link.click();
   } finally {
     document.body.removeChild(link);

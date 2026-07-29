@@ -43,6 +43,12 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
     }
   }, [dispatch, project]);
 
+  // Fix #2: exportError czyszczony przy zmianie projectId — komunikat błędu
+  // z poprzedniego projektu nie może wisieć po przełączeniu na nowy projekt
+  useEffect(() => {
+    setExportError(null);
+  }, [projectId]);
+
   if (!project) {
     return null;
   }
@@ -58,7 +64,8 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
   const handleExportTexture = () => {
     setExportError(null);
 
-    let result;
+    // Fix #1: jawna adnotacja typu — eliminuje implicit any
+    let result: ReturnType<ProjectionEngine['project2D']>;
     try {
       const engine = new ProjectionEngine(project);
       result = engine.project2D();

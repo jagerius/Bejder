@@ -39,9 +39,12 @@ function getUniqueProjectName(
 }
 
 // Fix #1: text/plain usunięty — był zbyt permisywny (każdy plik tekstowy
-// z rozszerzeniem .json przechodził walidację MIME). Dopuszczamy wyłącznie
-// application/json i text/json; pusty MIME (niektóre OS) traktujemy jako
-// brak informacji i pozwalamy decydować samemu rozszerzeniu.
+// z rozszerzeniem .json przechodził walidację MIME).
+// Fix #4: text/json pozostawiony celowo — to nieoficjalny typ MIME nadawany
+// przez starsze przeglądarki i niektóre systemy operacyjne (np. starsze Windows
+// z plikami .json bez zarejestrowanego handlera application/json).
+// Zgodność wsteczna jest pożądana, bo rozszerzenie .json jest i tak walidowane
+// osobno, więc bezpieczeństwo nie ucierpi.
 const ALLOWED_MIME_TYPES = new Set(['application/json', 'text/json']);
 // Fix #5: maksymalny dozwolony rozmiar pliku importu — 5 MB
 const MAX_IMPORT_FILE_SIZE_BYTES = 5 * 1024 * 1024;
@@ -151,6 +154,9 @@ export default function Dashboard() {
         setImportError('Nie udało się zaimportować projektu.');
       }
     };
+    // Fix #5: reader.onerror — obsługa błędu odczytu pliku (np. plik usunięty
+    // między wyborem a odczytem, błąd uprawnień, przerwanie przez użytkownika).
+    // Ustawia importError z komunikatem dla użytkownika i czyści notice.
     reader.onerror = () => {
       setNotice(null);
       setImportError('Nie udało się odczytać pliku.');

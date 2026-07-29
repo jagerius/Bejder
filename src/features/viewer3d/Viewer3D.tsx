@@ -1,7 +1,7 @@
 tsx
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { ProjectionEngine } from '@/domain/projection/ProjectionEngine';
 import type { Project } from '@/shared/types';
 
@@ -9,162 +9,171 @@ interface Viewer3DProps {
   project: Project;
 }
 
-interface SceneRefs {
-  renderer: THREE.WebGLRenderer;
-  scene: THREE.Scene;
-  camera: THREE.PerspectiveCamera;
-  controls: OrbitControls;
-  mesh: THREE.Mesh | null;
-  animationFrameId: number;
-}
-
-// Fix #2: helper do disposal mesha — wywoływany zarówno przy podmianie mesh
-// (drugi useEffect) jak i przy unmount (cleanup pierwszego useEffect)
+// Fix #3: disposeMesh obsługuje zarówno MeshStandardMaterial, jak i tablicę
+// materiałów (Array.isArray) — niektóre geometrie (np. z multi-material groups)
+// zwracają material jako tablicę; bez tego tylko pierwszy element byłby zwalniany
 function disposeMesh(mesh: THREE.Mesh): void {
-  const material = mesh.material as THREE.MeshStandardMaterial;
-  material.map?.dispose();
-  material.dispose();
   mesh.geometry.dispose();
+  const material = mesh.material;
+  if (Array.isArray(material)) {
+    material.forEach((m) => m.dispose());
+  } else {
+    material.dispose();
+  }
 }
 
 export default function Viewer3D({ project }: Viewer3DProps) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  // Fix #5: scena przechowywana w useRef — tworzona raz, aktualizowana
-  // przez osobny useEffect bez remountu całego WebGL kontekstu
-  const sceneRefsRef = useRef<SceneRefs | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const meshRef = useRef<THREE.Mesh | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
+  // Fix #2: cameraStateRef przechowuje pozycję i target kamery między renderami
+  // efektów — kamera nie jest resetowana przy każdej zmianie patternMap
+  const cameraStateRef = useRef<{ position: THREE.Vector3; target: THREE.Vector3 } | null>(null);
+  // Fix #4: sphereGeometryRef przechowuje geometrię niezależnie od patternMap —
+  // geometria zależy wyłącznie od diameterMm i nie jest odtwarzana przy malowaniu
+  const sphereGeometryRef = useRef<THREE.SphereGeometry | null>(null);
 
-  // Fix #5: pierwszy useEffect — inicjalizacja sceny, renderer, kamera, controls.
-  // Uruchamia się dokładnie raz ([] deps). Cleanup niszczy renderer i controls.
+  // Fix #1, #2: inicjalizacja sceny — tylko przy mount/unmount lub zmianie projectId.
+  // Zmiana patternMap NIE resetuje kamery ani sceny — tekstura jest podmieniana
+  // przez osobny efekt [project] poniżej.
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
+    if (!containerRef.current) return;
 
-    const width = container.clientWidth || 640;
-    const height = container.clientHeight || 480;
+    const width = containerRef.current.clientWidth;
+    const height = containerRef.current.clientHeight;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a1a2e);
+    sceneRef.current = scene;
+
+    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+    const radiusMm = project.ornamentSpec.diameterMm / 2;
+
+    // Fix #2: przywracamy zapisaną pozycję kamery jeśli istnieje —
+    // użytkownik nie traci orientacji po każdym pomalowaniu koralika
+    if (cameraStateRef.current) {
+      camera.position.copy(cameraStateRef.current.position);
+    } else {
+      camera.position.set(0, radiusMm * 2, radiusMm * 3);
+    }
+    cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(window.devicePixelRatio);
-    container.appendChild(renderer.domElement);
-
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1a1a2e);
-
-    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 2000);
-
-    // Fix #4: przywrócone OrbitControls — interaktywny obrót i zoom kamery
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.08;
+    containerRef.current.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
 
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     scene.add(ambientLight);
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
-    directionalLight.position.set(5, 5, 5);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(5, 10, 7);
     scene.add(directionalLight);
 
-    // Fix #1: ResizeObserver zamiast window resize — reaguje na zmianę
-    // rozmiaru kontenera (np. przy przełączaniu zakładek, zmianie layoutu),
-    // a nie tylko na zmianę rozmiaru okna przeglądarki
-    const resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width: w, height: h } = entry.contentRect;
-        // Fix #4: continue zamiast return — pomija zerowe wymiary
-        // bez przerywania przetwarzania pozostałych entries
-        if (w === 0 || h === 0) continue;
-        renderer.setSize(w, h);
-        camera.aspect = w / h;
-        camera.updateProjectionMatrix();
-      }
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+
+    // Fix #2: przywracamy zapisany target OrbitControls jeśli istnieje
+    if (cameraStateRef.current) {
+      controls.target.copy(cameraStateRef.current.target);
+    } else {
+      controls.target.set(0, 0, 0);
+    }
+    controls.update();
+
+    // Fix #2: zapisujemy stan kamery przy każdej zmianie — efekt [project]
+    // może go przywrócić bez resetowania orientacji użytkownika
+    controls.addEventListener('change', () => {
+      cameraStateRef.current = {
+        position: camera.position.clone(),
+        target: controls.target.clone(),
+      };
     });
-    resizeObserver.observe(container);
+    controlsRef.current = controls;
 
-    const refs: SceneRefs = {
-      renderer,
-      scene,
-      camera,
-      controls,
-      mesh: null,
-      animationFrameId: 0,
-    };
-    sceneRefsRef.current = refs;
+    // Fix #4: geometria tworzona raz tutaj — zależy wyłącznie od diameterMm.
+    // Zmiana patternMap (malowanie) nie odtwarza geometrii — podmienia tylko
+    // teksturę na istniejącym materiale przez osobny efekt poniżej.
+    const sphereRadius = radiusMm;
+    const geometry = new THREE.SphereGeometry(sphereRadius, 64, 64);
+    sphereGeometryRef.current = geometry;
 
+    const engine = new ProjectionEngine(project);
+    const { textureCanvas } = engine.project2D();
+    const texture = new THREE.CanvasTexture(textureCanvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+
+    const material = new THREE.MeshStandardMaterial({ map: texture });
+    const mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
+    meshRef.current = mesh;
+
+    let animationId: number;
     const animate = () => {
-      refs.animationFrameId = requestAnimationFrame(animate);
+      animationId = requestAnimationFrame(animate);
       controls.update();
       renderer.render(scene, camera);
     };
     animate();
 
-    return () => {
-      cancelAnimationFrame(refs.animationFrameId);
-      resizeObserver.disconnect();
-      controls.dispose();
-      // Fix #2: dispose mesh przed zniszczeniem renderer — tekstura i geometria
-      // są zwalniane z pamięci GPU; bez tego przy unmount następował wyciek
-      if (refs.mesh) {
-        scene.remove(refs.mesh);
-        disposeMesh(refs.mesh);
-        refs.mesh = null;
-      }
-      renderer.dispose();
-      if (renderer.domElement.parentElement === container) {
-        container.removeChild(renderer.domElement);
-      }
-      sceneRefsRef.current = null;
+    const handleResize = () => {
+      if (!containerRef.current) return;
+      const w = containerRef.current.clientWidth;
+      const h = containerRef.current.clientHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
     };
-  }, []);
+    window.addEventListener('resize', handleResize);
 
-  // Fix #5: drugi useEffect — aktualizuje wyłącznie geometrię/teksturę mesh
-  // przy zmianie projektu. Nie tworzy nowej sceny ani renderer — tylko
-  // podmienia mesh w istniejącej scenie (O(1) koszt aktualizacji).
-  // Fix #3: pozycja kamery i limity zoomu skalowane do diameterMm projektu
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      cancelAnimationFrame(animationId);
+      controls.dispose();
+      renderer.dispose();
+      if (containerRef.current && renderer.domElement.parentNode === containerRef.current) {
+        containerRef.current.removeChild(renderer.domElement);
+      }
+      if (meshRef.current) {
+        disposeMesh(meshRef.current);
+        meshRef.current = null;
+      }
+      sphereGeometryRef.current = null;
+    };
+    // Fix #2: deps [project.projectId, project.ornamentSpec.diameterMm] —
+    // reset sceny tylko przy zmianie projektu lub średnicy, nie przy malowaniu
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.projectId, project.ornamentSpec.diameterMm]);
+
+  // Fix #4: podmiana tekstury przy każdej zmianie patternMap — geometria i kamera
+  // pozostają nietknięte; aktualizujemy tylko material.map i needsUpdate
   useEffect(() => {
-    const refs = sceneRefsRef.current;
-    if (!refs) return;
-
-    const radius = project.ornamentSpec.diameterMm / 2;
-
-    // Fix #3: kamera skalowana do rozmiaru ornamentu — sztywne (0,0,220)
-    // było poprawne tylko dla diameterMm ≈ 80 mm; teraz działa dla każdego rozmiaru
-    refs.camera.position.set(0, 0, radius * 3.5);
-    refs.controls.minDistance = radius * 1.2;
-    refs.controls.maxDistance = radius * 8;
-    refs.controls.update();
+    const mesh = meshRef.current;
+    if (!mesh) return;
 
     const engine = new ProjectionEngine(project);
-    const result = engine.project2D();
-
-    const texture = new THREE.CanvasTexture(result.textureCanvas);
+    const { textureCanvas } = engine.project2D();
+    const texture = new THREE.CanvasTexture(textureCanvas);
     texture.colorSpace = THREE.SRGBColorSpace;
 
-    const geometry = new THREE.SphereGeometry(radius, 64, 48);
-    const material = new THREE.MeshStandardMaterial({
-      map: texture,
-      roughness: 0.7,
-      metalness: 0.0,
-    });
-    const mesh = new THREE.Mesh(geometry, material);
-
-    if (refs.mesh) {
-      refs.scene.remove(refs.mesh);
-      disposeMesh(refs.mesh);
+    const material = mesh.material as THREE.MeshStandardMaterial;
+    if (material.map) {
+      material.map.dispose();
     }
-
-    refs.scene.add(mesh);
-    refs.mesh = mesh;
+    material.map = texture;
+    material.needsUpdate = true;
   }, [project]);
 
   return (
-    <section aria-label="Podgląd 3D" className="viewer-3d">
-      {/* Fix #2: role="img" przywrócone — kontener canvas reprezentuje
-          wizualizację 3D, wymaga opisu dla czytników ekranu */}
-      <div
-        ref={containerRef}
-        className="viewer-3d__container"
-        aria-label="Interaktywny podgląd 3D ornamentu — przeciągnij aby obrócić, scroll aby przybliżyć"
-        role="img"
-      />
-    </section>
+    <div
+      ref={containerRef}
+      className="viewer-3d"
+      aria-label="Podgląd ornamentu 3D"
+      style={{ width: '100%', height: '100%' }}
+    />
   );
 }

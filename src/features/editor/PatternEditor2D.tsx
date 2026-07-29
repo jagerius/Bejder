@@ -201,11 +201,10 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     ctx.restore();
   }, [project.segments, layout, zoom, pan, getCellColor, getCellPosition]);
 
+  // Fix #4: paintCell przyjmuje hit jako parametr — hit-test wykonywany raz
+  // w handlePointerDown / handlePointerMove, bez duplikowania findCellAtPoint
   const paintCell = useCallback(
-    (clientX: number, clientY: number) => {
-      const hit = findCellAtPoint(clientX, clientY);
-      if (!hit) return;
-
+    (hit: CellHit) => {
       const nextPatternMap: PatternMap = { ...project.patternMap };
       if (selectedColorId) {
         nextPatternMap[hit.cell.id] = selectedColorId;
@@ -216,11 +215,12 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
         updatePatternMap({ projectId: project.projectId, patternMap: nextPatternMap })
       );
     },
-    [dispatch, findCellAtPoint, project.patternMap, project.projectId, selectedColorId]
+    [dispatch, project.patternMap, project.projectId, selectedColorId]
   );
 
   // Fix #5: pushHistory dispatchowany dopiero po weryfikacji trafienia —
-  // kliknięcie poza komórką nie zapisuje wpisu w historii
+  // kliknięcie poza komórką nie zapisuje wpisu w historii.
+  // Fix #4: hit przekazany bezpośrednio do paintCell — bez podwójnego hit-testu.
   const handlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -236,7 +236,7 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
 
       dispatch(pushHistory(project.patternMap));
       isPaintingRef.current = true;
-      paintCell(event.clientX, event.clientY);
+      paintCell(hit);
     },
     [dispatch, findCellAtPoint, paintCell, project.patternMap]
   );
@@ -257,10 +257,11 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
       }
 
       if (isPaintingRef.current) {
-        paintCell(event.clientX, event.clientY);
+        const hit = findCellAtPoint(event.clientX, event.clientY);
+        if (hit) paintCell(hit);
       }
     },
-    [dispatch, paintCell, pan.x, pan.y]
+    [dispatch, findCellAtPoint, paintCell, pan.x, pan.y]
   );
 
   // Fix #1: celowe puste [] deps — handler operuje wyłącznie na refach
@@ -279,8 +280,16 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
   );
 
   // Fix #2: event.preventDefault() — zapobiega jednoczesnemu scrollowi strony
-  // przy zoomie kółkiem myszy. React 17+ rejestruje onWheel jako nie-passive,
-  // więc preventDefault działa poprawnie.
+  // przy zoomie kółkiem myszy. React 17+ rejestruje onWheel jako zdarzenie
+  // synthetic z możliwością preventDefault.
+  //
+  // UWAGA — weryfikacja praktyczna per przeglądarka:
+  // Chrome/Edge/Firefox (React 17+): preventDefault działa poprawnie.
+  // Safari ≤ 16: może ignorować preventDefault w wheel bez
+  //   touch-action: none na elemencie canvas — dodaj w CSS:
+  //   .pattern-editor__canvas { touch-action: none; }
+  // Jeśli zoom i scroll nadal występują jednocześnie w Safari,
+  // rozważ rejestrację natywnego listenera z { passive: false } przez useRef.
   const handleWheel = useCallback(
     (event: React.WheelEvent<HTMLCanvasElement>) => {
       event.preventDefault();

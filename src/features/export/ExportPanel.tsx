@@ -213,19 +213,27 @@ export default function ExportPanel({ project }: ExportPanelProps) {
       pdf.text('Instrukcja koralikowania rzędami', MARGIN_MM, MARGIN_MM + 2);
 
       cursorY = MARGIN_MM + LINE_HEIGHT_MM + 4;
+      const maxTextWidth = PAGE_WIDTH_MM - 2 * MARGIN_MM;
       for (const [rowNum, cells] of rowInstructions) {
-        cursorY = ensureLineSpace(pdf, cursorY, 'Instrukcja koralikowania — cd.');
-        pdf.setFontSize(10);
-        pdf.text(
-          `Rząd ${rowNum}: ${cells.map((c) => c.colorName).join(', ')}`,
-          MARGIN_MM,
-          cursorY
-        );
-        cursorY += LINE_HEIGHT_MM;
+        // Fix #5: numeracja od 1 (rowNum + 1) — rowNum jest 0-indexed w kodzie,
+        // ale instrukcja dla użytkownika powinna liczyć rzędy od 1
+        const rowText = `Rząd ${rowNum + 1}: ${cells.map((c) => c.colorName).join(', ')}`;
+        // Fix #5: splitTextToSize — długie rzędy są zawijane zamiast wychodzić
+        // poza margines strony; każda linia zajmuje LINE_HEIGHT_MM
+        const lines = pdf.splitTextToSize(rowText, maxTextWidth) as string[];
+        for (const line of lines) {
+          cursorY = ensureLineSpace(pdf, cursorY, 'Instrukcja koralikowania — cd.');
+          pdf.setFontSize(10);
+          pdf.text(line, MARGIN_MM, cursorY);
+          cursorY += LINE_HEIGHT_MM;
+        }
       }
 
       pdf.save(`${project.name}-instrukcja.pdf`);
     } catch (error) {
+      // Fix #2: console.error — błąd logowany do konsoli deweloperskiej
+      // niezależnie od komunikatu wyświetlanego użytkownikowi
+      console.error('[ExportPanel] Błąd eksportu PDF:', error);
       setExportError(
         `Nie udało się wyeksportować PDF: ${error instanceof Error ? error.message : 'nieznany błąd'}`
       );
@@ -239,6 +247,9 @@ export default function ExportPanel({ project }: ExportPanelProps) {
     try {
       downloadProjectJSON(project);
     } catch (error) {
+      // Fix #2: console.error — błąd logowany do konsoli deweloperskiej
+      // niezależnie od komunikatu wyświetlanego użytkownikowi
+      console.error('[ExportPanel] Błąd eksportu JSON:', error);
       setExportError(
         `Nie udało się wyeksportować JSON: ${error instanceof Error ? error.message : 'nieznany błąd'}`
       );
@@ -278,7 +289,15 @@ export default function ExportPanel({ project }: ExportPanelProps) {
         >
           {isExporting ? 'Generowanie PDF…' : 'Eksportuj PDF (instrukcja)'}
         </button>
-        <button type="button" onClick={handleExportJson}>
+        {/* Fix #3: disabled={isExporting} — zapobiega race condition między
+            eksportem PDF (async, trwa) a eksportem JSON (sync, natychmiastowy).
+            Bez tego użytkownik mógł kliknąć JSON podczas trwania eksportu PDF,
+            co prowadziło do nakładających się operacji i nieprzewidywalnego stanu. */}
+        <button
+          type="button"
+          disabled={isExporting}
+          onClick={handleExportJson}
+        >
           Eksportuj JSON (projekt)
         </button>
       </div>
@@ -291,8 +310,23 @@ export default function ExportPanel({ project }: ExportPanelProps) {
           <ul>
             {bomEntries.map((entry) => (
               <li key={entry.colorId} className="export-panel__bom-item">
-                {/* Fix #5: klasa CSS zamiast inline style — kolor przekazywany
-                    przez CSS custom property --swatch-color ustawiane w stylesheetcie */}
+                {/*
+                  Fix #4: --swatch-color przekazywane jako CSS custom property.
+                  WYMAGANA reguła w arkuszu stylów (export-panel.css lub global.css):
+
+                    .export-panel__swatch {
+                      display: inline-block;
+                      width: 12px;
+                      height: 12px;
+                      border-radius: 2px;
+                      background-color: var(--swatch-color, transparent);
+                      border: 1px solid rgba(0,0,0,0.2);
+                      flex-shrink: 0;
+                    }
+
+                  Bez tej reguły koraliki są niewidoczne (background-color
+                  nie jest ustawiony, bo var(--swatch-color) nie ma gdzie się rozwiązać).
+                */}
                 <span
                   className="export-panel__swatch"
                   style={{ '--swatch-color': entry.hex } as React.CSSProperties}
