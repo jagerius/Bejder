@@ -219,9 +219,19 @@ export async function loadProjects(): Promise<Project[]> {
       store.getAll()
     );
 
-    return result
-      .map((entry) => projectSchema.parse(entry) as Project)
-      .sort((a, b) => b.metadata.updatedAt.localeCompare(a.metadata.updatedAt));
+    // FIX: użycie safeParse zamiast parse — uszkodzony rekord jest pomijany,
+    // nie powoduje odrzucenia całej listy i crashu widoku Dashboard.
+    const projects: Project[] = [];
+    for (const entry of result) {
+      const parsed = projectSchema.safeParse(entry);
+      if (parsed.success) {
+        projects.push(parsed.data as Project);
+      }
+    }
+
+    return projects.sort((a, b) =>
+      b.metadata.updatedAt.localeCompare(a.metadata.updatedAt)
+    );
   });
 }
 
