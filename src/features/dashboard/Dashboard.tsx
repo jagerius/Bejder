@@ -10,7 +10,6 @@ import {
 } from '@/app/store/projectSlice';
 import type { Project } from '@/shared/types';
 import { ORNAMENT_PRESETS } from '@/shared/constants';
-// Fix #2: projectSchema importowany z persistence.ts — eliminuje duplikację
 import { projectSchema } from '@/shared/utils/persistence';
 
 function getUniqueProjectName(
@@ -38,15 +37,7 @@ function getUniqueProjectName(
   return candidate;
 }
 
-// Fix #1: text/plain usunięty — był zbyt permisywny (każdy plik tekstowy
-// z rozszerzeniem .json przechodził walidację MIME).
-// Fix #4: text/json pozostawiony celowo — to nieoficjalny typ MIME nadawany
-// przez starsze przeglądarki i niektóre systemy operacyjne (np. starsze Windows
-// z plikami .json bez zarejestrowanego handlera application/json).
-// Zgodność wsteczna jest pożądana, bo rozszerzenie .json jest i tak walidowane
-// osobno, więc bezpieczeństwo nie ucierpi.
 const ALLOWED_MIME_TYPES = new Set(['application/json', 'text/json']);
-// Fix #5: maksymalny dozwolony rozmiar pliku importu — 5 MB
 const MAX_IMPORT_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 
 export default function Dashboard() {
@@ -71,7 +62,7 @@ export default function Dashboard() {
     setNotice(
       uniqueName === projectName.trim()
         ? null
-        : `Nazwa została zmieniona na „${uniqueName}", aby uniknąć duplikatu.`
+        : `Nazwa została zmieniona na „${uniqueName}”, aby uniknąć duplikatu.`
     );
     setImportError(null);
   };
@@ -81,12 +72,8 @@ export default function Dashboard() {
     event.target.value = '';
     if (!file) return;
 
-    // Fix #5: walidacja typu pliku PRZED walidacją rozmiaru — komunikat
-    // o nieprawidłowym typie jest ważniejszy diagnostycznie niż rozmiar;
-    // użytkownik dowiaduje się najpierw, że wybrał zły format pliku
     const hasValidExtension = file.name.toLowerCase().endsWith('.json');
-    const isMimeAcceptable =
-      file.type === '' || ALLOWED_MIME_TYPES.has(file.type);
+    const isMimeAcceptable = file.type === '' || ALLOWED_MIME_TYPES.has(file.type);
 
     if (!hasValidExtension || !isMimeAcceptable) {
       setNotice(null);
@@ -96,8 +83,6 @@ export default function Dashboard() {
       return;
     }
 
-    // Fix #5: limit rozmiaru pliku sprawdzany przed FileReader — zapobiega
-    // wczytaniu bardzo dużych plików (setki MB) do pamięci przez readAsText
     if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
       setNotice(null);
       const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
@@ -109,6 +94,7 @@ export default function Dashboard() {
     }
 
     const reader = new FileReader();
+
     reader.onload = () => {
       try {
         const raw = typeof reader.result === 'string' ? reader.result : '';
@@ -136,10 +122,10 @@ export default function Dashboard() {
         setImportError(null);
         setNotice(
           existing
-            ? `Projekt „${uniqueName}" został zaktualizowany.`
+            ? `Projekt „${uniqueName}” został zaktualizowany.`
             : uniqueName === validated.name
-              ? `Zaimportowano projekt „${uniqueName}".`
-              : `Zaimportowano projekt jako „${uniqueName}", aby uniknąć duplikatu nazwy.`
+              ? `Zaimportowano projekt „${uniqueName}”.`
+              : `Zaimportowano projekt jako „${uniqueName}”, aby uniknąć duplikatu nazwy.`
         );
       } catch (error) {
         setNotice(null);
@@ -154,17 +140,22 @@ export default function Dashboard() {
         setImportError('Nie udało się zaimportować projektu.');
       }
     };
-    // Fix #5: reader.onerror — obsługa błędu odczytu pliku (np. plik usunięty
-    // między wyborem a odczytem, błąd uprawnień, przerwanie przez użytkownika).
-    // Ustawia importError z komunikatem dla użytkownika i czyści notice.
+
+    // Fix #2: reader.onerror i reader.onabort rozdzielone jawnie.
+    // Anulowanie wyboru/odczytu nie powinno być raportowane jako błąd.
     reader.onerror = () => {
       setNotice(null);
       setImportError('Nie udało się odczytać pliku.');
     };
+
+    reader.onabort = () => {
+      setImportError(null);
+      setNotice('Odczyt pliku został anulowany.');
+    };
+
     reader.readAsText(file);
   };
 
-  // Fix #3: notice czyszczony przed usunięciem projektu
   const handleDeleteProject = (projectId: string) => {
     setNotice(null);
     setImportError(null);

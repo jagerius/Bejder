@@ -1,5 +1,4 @@
 tsx
-// Fix #1: import React — wymagany dla React.PointerEvent, React.WheelEvent
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '@/app/store';
 import {
@@ -28,8 +27,6 @@ interface CellHit {
 const CELL_SIZE = 28;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 4;
-
-// Fix #3: rozmiar bucketu dla spatial hash — dobierany do wielkości komórki
 const SPATIAL_BUCKET_SIZE = CELL_SIZE * 2;
 
 function clampZoom(value: number): number {
@@ -80,7 +77,6 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     return { positions, width: maxX + CELL_SIZE, height: maxY + CELL_SIZE };
   }, [project.segments, project.ornamentSpec.segmentRows]);
 
-  // Fix #2 (cellHitIndex): O(1) lookup cellId → {segment, cell}
   const cellHitIndex = useMemo<Map<string, CellHit>>(() => {
     const index = new Map<string, CellHit>();
     for (const segment of project.segments) {
@@ -91,8 +87,6 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     return index;
   }, [project.segments]);
 
-  // Fix #3: spatial hash — bucket grid budowany raz w useMemo
-  // findCellAtPoint sprawdza tylko komórki w okolicznych bucketach (O(1) zamiast O(n))
   const spatialHash = useMemo<Map<string, string[]>>(() => {
     const hash = new Map<string, string[]>();
     for (const [cellId, pos] of layout.positions) {
@@ -119,13 +113,10 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
   );
 
   const getCellPosition = useCallback(
-    (cell: BeadCell): CellPosition | null => {
-      return layout.positions.get(cell.id) ?? null;
-    },
+    (cell: BeadCell): CellPosition | null => layout.positions.get(cell.id) ?? null,
     [layout.positions]
   );
 
-  // Fix #3: findCellAtPoint używa spatial hash — sprawdza tylko buckety sąsiadujące
   const findCellAtPoint = useCallback(
     (clientX: number, clientY: number): CellHit | null => {
       const canvas = canvasRef.current;
@@ -137,7 +128,6 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
       const bx = Math.floor(worldX / SPATIAL_BUCKET_SIZE);
       const by = Math.floor(worldY / SPATIAL_BUCKET_SIZE);
 
-      // Sprawdzamy 3×3 buckety wokół punktu, aby obsłużyć komórki przy granicy
       for (let dx = -1; dx <= 1; dx++) {
         for (let dy = -1; dy <= 1; dy++) {
           const candidates = spatialHash.get(bucketKey(bx + dx, by + dy));
@@ -159,7 +149,6 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     [layout.positions, cellHitIndex, spatialHash, pan.x, pan.y, zoom]
   );
 
-  // Fix #3: resize canvasu TYLKO gdy layout się zmienia — nie przy zoom/pan
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -167,7 +156,6 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     canvas.height = layout.height;
   }, [layout]);
 
-  // Fix #3: rysowanie — bez zmiany canvas.width/height, brak kosztownego resetu
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -201,8 +189,6 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     ctx.restore();
   }, [project.segments, layout, zoom, pan, getCellColor, getCellPosition]);
 
-  // Fix #4: paintCell przyjmuje hit jako parametr — hit-test wykonywany raz
-  // w handlePointerDown / handlePointerMove, bez duplikowania findCellAtPoint
   const paintCell = useCallback(
     (hit: CellHit) => {
       const nextPatternMap: PatternMap = { ...project.patternMap };
@@ -218,21 +204,59 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
     [dispatch, project.patternMap, project.projectId, selectedColorId]
   );
 
-  // Fix #5: pushHistory dispatchowany dopiero po weryfikacji trafienia —
-  // kliknięcie poza komórką nie zapisuje wpisu w historii.
-  // Fix #4: hit przekazany bezpośrednio do paintCell — bez podwójnego hit-testu.
+  const resetPointerInteraction = useCallback(() => {
+    isPaintingRef.current = false;
+    isPanningRef.current = false;
+    lastPointerRef.current = null;
+    setPointerVersion((value) => value + 1);
+  }, []);
+
+  const handlePointerUp = useCallback(
+    (event?: React.PointerEvent<HTMLCanvasElement>) => {
+      if (event?.currentTarget.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      resetPointerInteraction();
+    },
+    [resetPointerInteraction]
+  );
+
+  // Fix #1: jawna obsługa onPointerCancel i onPointerLeave.
+  // Oba przypadki resetują tryb malowania/panowania i zwalniają pointer capture,
+  // aby aplikacja nie utkwiła w stanie "painting" po utracie gestu przez system
+  // lub wyjściu kursora poza canvas.
+  const handlePointerCancel = useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      handlePointerUp(event);
+    },
+    [handlePointerUp]
+  );
+
+  const handlePointerLeave = useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      handlePointerUp(event);
+    },
+    [handlePointerUp]
+  );
+
   const handlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
+      event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
-      lastPointerRef.current = { x: event.clientX, y: event.clientY };
 
-      if (event.button === 1 || event.button === 2 || event.shiftKey) {
+      if (event.button === 1 || event.button === 2 || event.altKey || event.metaKey) {
         isPanningRef.current = true;
+        lastPointerRef.current = { x: event.clientX, y: event.clientY };
         return;
       }
 
       const hit = findCellAtPoint(event.clientX, event.clientY);
-      if (!hit) return;
+      if (!hit) {
+        if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+        return;
+      }
 
       dispatch(pushHistory(project.patternMap));
       isPaintingRef.current = true;
@@ -243,84 +267,53 @@ export default function PatternEditor2D({ project }: PatternEditor2DProps) {
 
   const handlePointerMove = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
-      const last = lastPointerRef.current;
-
-      if (isPanningRef.current && last) {
-        dispatch(
-          setEditorPan({
-            x: pan.x + event.clientX - last.x,
-            y: pan.y + event.clientY - last.y,
-          })
-        );
+      if (isPanningRef.current && lastPointerRef.current) {
+        const dx = event.clientX - lastPointerRef.current.x;
+        const dy = event.clientY - lastPointerRef.current.y;
         lastPointerRef.current = { x: event.clientX, y: event.clientY };
+        dispatch(setEditorPan({ x: pan.x + dx, y: pan.y + dy }));
         return;
       }
 
-      if (isPaintingRef.current) {
-        const hit = findCellAtPoint(event.clientX, event.clientY);
-        if (hit) paintCell(hit);
-      }
+      if (!isPaintingRef.current) return;
+      const hit = findCellAtPoint(event.clientX, event.clientY);
+      if (!hit) return;
+      paintCell(hit);
     },
     [dispatch, findCellAtPoint, paintCell, pan.x, pan.y]
   );
 
-  // Fix #1: celowe puste [] deps — handler operuje wyłącznie na refach
-  // (isPaintingRef, isPanningRef, lastPointerRef) oraz na setPointerVersion
-  // z functional update, więc nie odczytuje żadnych wartości z closure.
-  // Nie dodawaj deps bez weryfikacji, że handler faktycznie ich potrzebuje.
-  const handlePointerUp = useCallback(
-    (event: React.PointerEvent<HTMLCanvasElement>) => {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-      isPaintingRef.current = false;
-      isPanningRef.current = false;
-      lastPointerRef.current = null;
-      setPointerVersion((version) => version + 1);
-    },
-    []
-  );
-
-  // Fix #2: event.preventDefault() — zapobiega jednoczesnemu scrollowi strony
-  // przy zoomie kółkiem myszy. React 17+ rejestruje onWheel jako zdarzenie
-  // synthetic z możliwością preventDefault.
-  //
-  // UWAGA — weryfikacja praktyczna per przeglądarka:
-  // Chrome/Edge/Firefox (React 17+): preventDefault działa poprawnie.
-  // Safari ≤ 16: może ignorować preventDefault w wheel bez
-  //   touch-action: none na elemencie canvas — dodaj w CSS:
-  //   .pattern-editor__canvas { touch-action: none; }
-  // Jeśli zoom i scroll nadal występują jednocześnie w Safari,
-  // rozważ rejestrację natywnego listenera z { passive: false } przez useRef.
   const handleWheel = useCallback(
-    (event: React.WheelEvent<HTMLCanvasElement>) => {
+    (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
-      const nextZoom = clampZoom(zoom * (event.deltaY < 0 ? 1.1 : 0.9));
-      dispatch(setEditorZoom(nextZoom));
+
+      const delta = event.deltaY < 0 ? 0.1 : -0.1;
+      dispatch(setEditorZoom(clampZoom(zoom + delta)));
     },
     [dispatch, zoom]
   );
 
-  // Fix #5: nazwany handler zamiast inline arrow — spójny z resztą handlerów,
-  // stabilna referencja zapobiega niepotrzebnym re-renderom
-  const handleContextMenu = useCallback(
-    (event: React.MouseEvent<HTMLCanvasElement>) => {
-      event.preventDefault();
-    },
-    []
-  );
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener('wheel', handleWheel);
+    };
+  }, [handleWheel]);
 
   return (
-    <section aria-label="Edytor wzoru 2D" className="pattern-editor">
+    <section className="pattern-editor-2d" aria-label="Edytor wzoru 2D">
       <canvas
         ref={canvasRef}
-        className="pattern-editor__canvas"
-        aria-label="Edytor wzoru koralikowego"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
-        onPointerLeave={handlePointerUp}
-        onWheel={handleWheel}
-        onContextMenu={handleContextMenu}
+        onPointerCancel={handlePointerCancel}
+        onPointerLeave={handlePointerLeave}
+        style={{ cursor: isPanningRef.current ? 'grabbing' : 'crosshair' }}
       />
     </section>
   );

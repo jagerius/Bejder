@@ -12,65 +12,61 @@ function cellKey(row: number, col: number): string {
   return `${row}:${col}`;
 }
 
-// Fix #2: buildAdjacencyIndex obsługuje sąsiedztwo zarówno wewnątrz-, jak i
-// między-segmentowe. Budujemy globalną mapę row:col → cellId dla wszystkich
-// segmentów, dzięki czemu flood fill przechodzi przez granice segmentów.
-// Sąsiedzi wewnątrz-segmentowi: row-1/row/row+1 z |col delta| ≤ 1.
-// Sąsiedzi między-segmentowi: ta sama pozycja (row, col) w segmentach ±1
-// z wrap-around: segment 0 jest sąsiadem segmentu N-1 (szew ornamentu).
+// Fix #1: buildAdjacencyIndex buduje wyłącznie strukturę Set<string>,
+// a serializacja do string[] następuje dopiero na końcu. Eliminuje to ryzyko
+// rozjazdu między neighborSets i index, bo istnieje tylko jedno źródło prawdy.
+// Fix #5: addBidirectionalNeighbor jawnie zapisuje relację A↔B symetrycznie.
 export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
-  const index: AdjacencyIndex = new Map();
-
-  // Fix #2 (poprawka): jedna globalna mapa Set per komórka — trzymana przez
-  // całą budowę indeksu, dzięki czemu dedup jest faktycznie O(1) przy każdym
-  // dodawaniu sąsiada, bez kosztu tworzenia nowego Set per komórka.
   const neighborSets = new Map<string, Set<string>>();
 
-  const addNeighbor = (cellId: string, neighborId: string): void => {
-    const set = neighborSets.get(cellId);
-    if (!set) return;
-    if (set.has(neighborId)) return;
-    set.add(neighborId);
-    index.get(cellId)?.push(neighborId);
+  const ensureCell = (cellId: string): Set<string> => {
+    let neighbors = neighborSets.get(cellId);
+    if (!neighbors) {
+      neighbors = new Set<string>();
+      neighborSets.set(cellId, neighbors);
+    }
+    return neighbors;
   };
 
-  // Sąsiedztwo wewnątrz-segmentowe — mapa row → cells eliminuje O(n²)
+  const addBidirectionalNeighbor = (aId: string, bId: string): void => {
+    if (aId === bId) return;
+    ensureCell(aId).add(bId);
+    ensureCell(bId).add(aId);
+  };
+
+  // Inicjalizacja wszystkich komórek i sąsiedztwo wewnątrz-segmentowe
   for (const segment of segments) {
     const rowMap = new Map<number, BeadCell[]>();
+
     for (const cell of segment.cells) {
+      ensureCell(cell.id);
       const bucket = rowMap.get(cell.row);
       if (bucket) {
         bucket.push(cell);
       } else {
         rowMap.set(cell.row, [cell]);
       }
-      index.set(cell.id, []);
-      neighborSets.set(cell.id, new Set());
     }
 
     for (const cell of segment.cells) {
       for (let row = cell.row - 1; row <= cell.row + 1; row++) {
         const candidates = rowMap.get(row);
         if (!candidates) continue;
+
         for (const candidate of candidates) {
           if (candidate.id === cell.id) continue;
           if (Math.abs(candidate.col - cell.col) <= 1) {
-            addNeighbor(cell.id, candidate.id);
+            addBidirectionalNeighbor(cell.id, candidate.id);
           }
         }
       }
     }
   }
 
-  // Sąsiedztwo między-segmentowe — łączymy komórki o tej samej (row, col)
-  // z sąsiednich segmentów. Indeks segmentu liczony modulo N, więc segment
-  // N-1 jest połączony z segmentem 0 (wrap-around na szwie ornamentu).
-  // Fix #3: globalny neighborSets — O(1) dedup przy dodawaniu sąsiada,
-  // bez kosztu budowania tymczasowego Set per komórka.
+  // Sąsiedztwo między-segmentowe z wrap-around na szwie ornamentu
   const n = segments.length;
   for (let si = 0; si < n; si++) {
     const current = segments[si];
-    // Modulo zapewnia wrap-around: dla si=0 → n-1, dla si=n-1 → 0
     const adjacentIndexes = [
       (si - 1 + n) % n,
       (si + 1) % n,
@@ -79,18 +75,24 @@ export function buildAdjacencyIndex(segments: Segment[]): AdjacencyIndex {
     for (const adjIdx of adjacentIndexes) {
       const adjacent = segments[adjIdx];
       const adjCellIds = new Map<string, string>();
+
       for (const cell of adjacent.cells) {
+        ensureCell(cell.id);
         adjCellIds.set(cellKey(cell.row, cell.col), cell.id);
       }
 
       for (const cell of current.cells) {
         const counterpartId = adjCellIds.get(cellKey(cell.row, cell.col));
         if (counterpartId === undefined) continue;
-        addNeighbor(cell.id, counterpartId);
+        addBidirectionalNeighbor(cell.id, counterpartId);
       }
     }
   }
 
+  const index: AdjacencyIndex = new Map();
+  for (const [cellId, neighbors] of neighborSets) {
+    index.set(cellId, [...neighbors]);
+  }
   return index;
 }
 
@@ -122,7 +124,6 @@ export function sphereUVToCellId(segments: Segment[], uv: SphereUV): string | nu
   const byColumn = rowCells.find((cell) => cell.col === targetCol);
   if (byColumn) return byColumn.id;
 
-  // Fallback: najbliższa kolumna w rzędzie
   let closest: BeadCell | null = null;
   let closestDistance = Number.POSITIVE_INFINITY;
   for (const cell of rowCells) {

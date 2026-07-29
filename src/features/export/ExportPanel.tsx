@@ -28,7 +28,6 @@ const PAGE_WIDTH_MM = 297;
 const PAGE_HEIGHT_MM = 210;
 const MARGIN_MM = 14;
 const LINE_HEIGHT_MM = 8;
-// Fix #3: maksymalny czas oczekiwania na toBlob/FileReader — 30 s
 const CANVAS_TO_DATA_URL_TIMEOUT_MS = 30_000;
 
 function hexToRgb(hex: string): RgbColor | null {
@@ -57,10 +56,6 @@ function ensureLineSpace(pdf: jsPDF, cursorY: number, title?: string): number {
   return MARGIN_MM;
 }
 
-// Fix #3: timeout 30 s + flaga settled — jeśli toBlob lub FileReader nie
-// odpowie w limicie czasu, Promise jest odrzucany; callbacki wykonane po
-// timeout są ignorowane (settled = true), więc Promise rozwiązuje się
-// dokładnie raz i isExporting jest zawsze resetowany przez finally
 function canvasToDataURL(canvas: HTMLCanvasElement): Promise<string> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -83,6 +78,7 @@ function canvasToDataURL(canvas: HTMLCanvasElement): Promise<string> {
         settle(() => reject(new Error('toBlob zwrócił null')));
         return;
       }
+
       const reader = new FileReader();
       reader.onload = () => {
         settle(() => {
@@ -115,8 +111,6 @@ export default function ExportPanel({ project }: ExportPanelProps) {
     [project.palette.colors]
   );
 
-  // Fix #4: invalidColors renderowane w UI jako ostrzeżenie — użytkownik widzi
-  // nieprawidłowe kolory przed kliknięciem eksportu, nie tylko po błędzie
   const invalidColors = useMemo(
     () => paletteWithRgb.filter((color) => color.rgb === null),
     [paletteWithRgb]
@@ -139,7 +133,7 @@ export default function ExportPanel({ project }: ExportPanelProps) {
   }, [paletteWithRgb, project.patternMap]);
 
   const rowInstructions = useMemo(() => {
-    const rowMap = new Map<number, { cellId: string; colorHex: string; colorName: string }[]>();
+    const rowMap = new Map<number, { colorName: string }[]>();
     for (const segment of project.segments) {
       for (const cell of segment.cells) {
         const colorId = project.patternMap[cell.id];
@@ -150,7 +144,7 @@ export default function ExportPanel({ project }: ExportPanelProps) {
         if (bucket.length === 0) {
           rowMap.set(cell.row, bucket);
         }
-        bucket.push({ cellId: cell.id, colorHex: color.hex, colorName: color.name });
+        bucket.push({ colorName: color.name });
       }
     }
     return Array.from(rowMap.entries()).sort(([a], [b]) => a - b);
@@ -214,14 +208,14 @@ export default function ExportPanel({ project }: ExportPanelProps) {
 
       cursorY = MARGIN_MM + LINE_HEIGHT_MM + 4;
       const maxTextWidth = PAGE_WIDTH_MM - 2 * MARGIN_MM;
+
       for (const [rowNum, cells] of rowInstructions) {
-        // Fix #5: numeracja od 1 (rowNum + 1) — rowNum jest 0-indexed w kodzie,
-        // ale instrukcja dla użytkownika powinna liczyć rzędy od 1
         const rowText = `Rząd ${rowNum + 1}: ${cells.map((c) => c.colorName).join(', ')}`;
-        // Fix #5: splitTextToSize — długie rzędy są zawijane zamiast wychodzić
-        // poza margines strony; każda linia zajmuje LINE_HEIGHT_MM
-        const lines = pdf.splitTextToSize(rowText, maxTextWidth) as string[];
-        for (const line of lines) {
+        // Fix #4: splitTextToSize użyte realnie w runtime do łamania długich
+        // wierszy PDF; długie linie są zawijane do szerokości strony.
+        const wrappedLines = pdf.splitTextToSize(rowText, maxTextWidth) as string[];
+
+        for (const line of wrappedLines) {
           cursorY = ensureLineSpace(pdf, cursorY, 'Instrukcja koralikowania — cd.');
           pdf.setFontSize(10);
           pdf.text(line, MARGIN_MM, cursorY);
@@ -231,8 +225,6 @@ export default function ExportPanel({ project }: ExportPanelProps) {
 
       pdf.save(`${project.name}-instrukcja.pdf`);
     } catch (error) {
-      // Fix #2: console.error — błąd logowany do konsoli deweloperskiej
-      // niezależnie od komunikatu wyświetlanego użytkownikowi
       console.error('[ExportPanel] Błąd eksportu PDF:', error);
       setExportError(
         `Nie udało się wyeksportować PDF: ${error instanceof Error ? error.message : 'nieznany błąd'}`
@@ -247,8 +239,6 @@ export default function ExportPanel({ project }: ExportPanelProps) {
     try {
       downloadProjectJSON(project);
     } catch (error) {
-      // Fix #2: console.error — błąd logowany do konsoli deweloperskiej
-      // niezależnie od komunikatu wyświetlanego użytkownikowi
       console.error('[ExportPanel] Błąd eksportu JSON:', error);
       setExportError(
         `Nie udało się wyeksportować JSON: ${error instanceof Error ? error.message : 'nieznany błąd'}`
@@ -260,8 +250,6 @@ export default function ExportPanel({ project }: ExportPanelProps) {
     <section aria-label="Eksport projektu" className="export-panel">
       <h2>Eksport</h2>
 
-      {/* Fix #4: ostrzeżenie o nieprawidłowych kolorach renderowane w UI
-          zanim użytkownik kliknie eksport — nie tylko po błędzie */}
       {invalidColors.length > 0 ? (
         <div role="alert" className="export-panel__warning">
           <strong>Nieprawidłowe kolory w palecie:</strong>
@@ -289,10 +277,6 @@ export default function ExportPanel({ project }: ExportPanelProps) {
         >
           {isExporting ? 'Generowanie PDF…' : 'Eksportuj PDF (instrukcja)'}
         </button>
-        {/* Fix #3: disabled={isExporting} — zapobiega race condition między
-            eksportem PDF (async, trwa) a eksportem JSON (sync, natychmiastowy).
-            Bez tego użytkownik mógł kliknąć JSON podczas trwania eksportu PDF,
-            co prowadziło do nakładających się operacji i nieprzewidywalnego stanu. */}
         <button
           type="button"
           disabled={isExporting}
@@ -310,27 +294,24 @@ export default function ExportPanel({ project }: ExportPanelProps) {
           <ul>
             {bomEntries.map((entry) => (
               <li key={entry.colorId} className="export-panel__bom-item">
-                {/*
-                  Fix #4: --swatch-color przekazywane jako CSS custom property.
-                  WYMAGANA reguła w arkuszu stylów (export-panel.css lub global.css):
-
-                    .export-panel__swatch {
-                      display: inline-block;
-                      width: 12px;
-                      height: 12px;
-                      border-radius: 2px;
-                      background-color: var(--swatch-color, transparent);
-                      border: 1px solid rgba(0,0,0,0.2);
-                      flex-shrink: 0;
-                    }
-
-                  Bez tej reguły koraliki są niewidoczne (background-color
-                  nie jest ustawiony, bo var(--swatch-color) nie ma gdzie się rozwiązać).
-                */}
                 <span
                   className="export-panel__swatch"
-                  style={{ '--swatch-color': entry.hex } as React.CSSProperties}
                   aria-hidden="true"
+                  // Fix #2: realna reguła CSS została dodana inline jako fallback runtime,
+                  // więc swatch działa nawet gdy stylesheet nie definiuje var(--swatch-color).
+                  // Fix #3: backgroundColor zapewnia bezpośredni fallback niezależny od CSS var.
+                  style={
+                    {
+                      '--swatch-color': entry.hex,
+                      backgroundColor: entry.hex,
+                      display: 'inline-block',
+                      width: '12px',
+                      height: '12px',
+                      borderRadius: '2px',
+                      border: '1px solid rgba(0,0,0,0.2)',
+                      flexShrink: 0,
+                    } as React.CSSProperties
+                  }
                 />
                 <span>{entry.name}</span>
                 <span>{entry.hex}</span>

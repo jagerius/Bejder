@@ -2,13 +2,15 @@ tsx
 import { useEffect, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '@/app/store';
 import { setActiveProject } from '@/app/store/projectSlice';
-import { ProjectionEngine } from '@/domain/projection/ProjectionEngine';
+import {
+  ProjectionEngine,
+  type Projection2DResult,
+} from '@/domain/projection/ProjectionEngine';
 import PatternEditor2D from '@/features/editor/PatternEditor2D';
 import Viewer3D from '@/features/viewer3d/Viewer3D';
 import MaterialsPanel from '@/features/materials/MaterialsPanel';
 import ExportPanel from '@/features/export/ExportPanel';
 
-// Fix #4: przywrócona pełna nawigacja zakładkowa
 type TabId = 'pattern' | 'viewer3d' | 'materials' | 'export';
 
 interface Tab {
@@ -33,8 +35,6 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
     state.projects.projects.find((entry) => entry.projectId === projectId)
   );
   const [activeTab, setActiveTab] = useState<TabId>('pattern');
-  // Fix #2: stan błędu eksportu tekstury — wyświetlany użytkownikowi
-  // zamiast cichego return przy toBlob === null
   const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -43,8 +43,6 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
     }
   }, [dispatch, project]);
 
-  // Fix #2: exportError czyszczony przy zmianie projectId — komunikat błędu
-  // z poprzedniego projektu nie może wisieć po przełączeniu na nowy projekt
   useEffect(() => {
     setExportError(null);
   }, [projectId]);
@@ -57,15 +55,10 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
     dispatch(setActiveProject(null));
   };
 
-  // Fix #2: canvas.toBlob zamiast synchronicznego toDataURL — nie blokuje
-  // głównego wątku przy dużych canvasach; spójne z wzorcem z ExportPanel
-  // Fix #3: try/catch wokół engine.project2D() — unhandled exception
-  // zastąpiony komunikatem błędu wyświetlanym użytkownikowi
   const handleExportTexture = () => {
     setExportError(null);
 
-    // Fix #1: jawna adnotacja typu — eliminuje implicit any
-    let result: ReturnType<ProjectionEngine['project2D']>;
+    let result: Projection2DResult;
     try {
       const engine = new ProjectionEngine(project);
       result = engine.project2D();
@@ -77,7 +70,6 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
     }
 
     result.textureCanvas.toBlob((blob) => {
-      // Fix #2: null blob → komunikat błędu zamiast cichego return
       if (!blob) {
         setExportError('Nie udało się wygenerować pliku PNG — canvas zwrócił pusty wynik.');
         return;
@@ -90,6 +82,9 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
       document.body.appendChild(link);
       try {
         link.click();
+        // Fix #3: po udanym eksporcie jawnie czyścimy stan błędu,
+        // aby poprzedni komunikat nie wisiał mimo sukcesu.
+        setExportError(null);
       } finally {
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
@@ -136,7 +131,6 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
         </dl>
       </section>
 
-      {/* Fix #4: nawigacja zakładkowa z wszystkimi panelami */}
       <nav className="editor-layout__tabs" aria-label="Sekcje edytora">
         {TABS.map((tab) => (
           <button
