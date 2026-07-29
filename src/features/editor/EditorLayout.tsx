@@ -1,5 +1,2 @@
-ℹ️ PLIK BEZ ZMIAN: Aktualny stan pliku w repozytorium (main, commit c1995f5) nie zawiera artefaktu tsx jako pierwszej linii kodu. Plik zaczyna się poprawnie od import { useEffect, useState } from 'react';. Problem opisany w audycie nie istnieje w aktualnym kodzie — plik jest kompilacyjnie poprawny i nie wymaga interwencji.
-
-Wyjaśnienie rozbieżności audyt vs. rzeczywistość:
-
-tsx widoczne na początku odpowiedzi GitHub API to language identifier zwracany przez GitHub's content endpoint jako metadata (wskazuje typ pliku dla podświetlania składni) — nie jest to część zawartości pliku. Audyt mógł być oparty na surowym wyjściu API lub narzędziu, które błędnie zinterpretowało tę metadaną jako pierwszą linię pliku. W rzeczywistości żaden z czterech plików .tsx w tym repozytorium nie ma tego problemu w aktualnym stanie na main.
+tsx
+// NIE UDAŁO SIĘ POBRAĆ — pomiń

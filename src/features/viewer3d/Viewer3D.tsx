@@ -1,1 +1,2 @@
-ℹ️ PLIK BEZ ZMIAN: Aktualny stan pliku w repozytorium (main, commit c1995f5) nie zawiera artefaktu tsx jako pierwszej linii kodu. Plik zaczyna się poprawnie od import { useEffect, useRef } from 'react';. Problem opisany w audycie nie istnieje w aktualnym kodzie — plik jest kompilacyjnie poprawny i nie wymaga interwencji.
+tsx
+// NIE UDAŁO SIĘ POBRAĆ — pomiń
