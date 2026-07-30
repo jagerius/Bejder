@@ -69,5 +69,3 @@ export default function MaterialsPanel({ project }: MaterialsPanelProps) {
     </section>
   );
 }
-
-Zmiana: Usunięto dosłowny tekst tsx z pierwszej linii pliku (artefakt generatora). Plik rozpoczyna się teraz prawidłowym importem.
