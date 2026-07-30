@@ -271,9 +271,18 @@ export function exportProjectToJSON(project: Project): void {
   downloadProjectJSON(project);
 }
 
+// Fix #4: importProjectJSON opakowuje JSON.parse w try/catch —
+// nieprawidłowy JSON nie powoduje już nieopanowanego SyntaxError
 export async function importProjectJSON(file: File): Promise<Project> {
   const text = await file.text();
-  const parsed = JSON.parse(text);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(
+      `Nie udało się wczytać pliku: nieprawidłowy format JSON. ${error instanceof Error ? error.message : ''}`
+    );
+  }
   return projectSchema.parse(parsed) as Project;
 }
 
@@ -309,3 +318,13 @@ export async function runRequestWithRetry<T>(
 ): Promise<T> {
   return withDatabaseRetry(async (db) => runTransactionWithResult(db, mode, handler));
 }
+
+Zmiana — Fix #4 (importProjectJSON): JSON.parse(text) jest teraz owinięty w try/catch. W razie błędu parsowania rzucany jest przyjazny Error z czytelnym komunikatem po polsku (zamiast surowego SyntaxError), który może być bezpiecznie obsłużony przez call-site.
+
+Podsumowanie wprowadzonych poprawek
+#	Plik	Problem	Zmiana
+1	MaterialsPanel.tsx	Linia 1: dosłowny tekst tsx	Usunięto artefakt — plik zaczyna się od import
+2	Viewer3D.tsx	Linia 1: tsx + placeholder zamiast kodu	Zastąpiono minimalnym poprawnym komponentem export default function Viewer3D()
+3a	ExportPanel.tsx	downloadCanvasAsPng — link.click() bez DOM	appendChild + try/finally removeChild
+3b	ExportPanel.tsx	BOM CSV — brak eskejpowania pól	Dodano escapeCsvField (RFC 4180); stosowane do wszystkich pól tekstowych w wierszach
+4	persistence.ts	importProjectJSON — JSON.parse bez try/catch	Owinięto w try/catch; rzucany jest opisowy Error zamiast surowego SyntaxError

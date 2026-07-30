@@ -97,17 +97,35 @@ function canvasToDataURL(canvas: HTMLCanvasElement): Promise<string> {
   });
 }
 
+// Fix #3a: link przypinany do DOM przed click() i usuwany po — naprawia Firefox/Safari
 function downloadCanvasAsPng(canvas: HTMLCanvasElement, filename: string): void {
   const link = document.createElement('a');
   link.download = filename;
   link.href = canvas.toDataURL('image/png');
-  link.click();
+  document.body.appendChild(link);
+  try {
+    link.click();
+  } finally {
+    document.body.removeChild(link);
+  }
+}
+
+// Fix #3b: eskejpowanie wartości CSV — pola zawierające przecinek, cudzysłów lub newline
+// są opakowane w cudzysłowy, a wewnętrzne cudzysłowy podwajane (RFC 4180)
+function escapeCsvField(value: string): string {
+  if (/[",\n\r]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
 }
 
 function downloadBomAsCsv(bomEntries: BomEntry[], filename: string): void {
   const header = 'ID,Kolor,HEX,R,G,B,Ilość\n';
   const rows = bomEntries
-    .map((e) => `${e.colorId},${e.name},${e.hex},${e.rgb.r},${e.rgb.g},${e.rgb.b},${e.count}`)
+    .map(
+      (e) =>
+        `${escapeCsvField(e.colorId)},${escapeCsvField(e.name)},${escapeCsvField(e.hex)},${e.rgb.r},${e.rgb.g},${e.rgb.b},${e.count}`
+    )
     .join('\n');
   const csvContent = header + rows;
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -386,3 +404,9 @@ export default function ExportPanel({ project }: ExportPanelProps) {
     </section>
   );
 }
+
+Zmiany:
+
+Fix #3a (downloadCanvasAsPng): link jest teraz przypinany do document.body przed click() i usuwany w bloku finally — naprawia brak pobierania w Firefox i starszych wersjach Safari.
+
+Fix #3b (downloadBomAsCsv): dodano funkcję escapeCsvField zgodną z RFC 4180 — pola zawierające ,, " lub znaki nowej linii są opakowywane w cudzysłowy, a wewnętrzne cudzysłowy podwajane. Wszystkie pola tekstowe w wierszach BOM korzystają teraz z eskejpowania.
