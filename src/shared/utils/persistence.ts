@@ -115,9 +115,6 @@ function createTransaction(
   return { transaction, store };
 }
 
-// Fix #1: rozdzielenie API transakcyjnego na wariant void i wariant z wynikiem.
-// Dzięki temu call-site operacji typu put/delete/clear nie musi pamiętać
-// o sztucznym setResult(undefined), a operacje odczytu mają osobny, jawny kontrakt.
 function runTransaction(
   db: IDBDatabase,
   mode: IDBTransactionMode,
@@ -219,8 +216,6 @@ export async function loadProjects(): Promise<Project[]> {
       store.getAll()
     );
 
-    // FIX: użycie safeParse zamiast parse — uszkodzony rekord jest pomijany,
-    // nie powoduje odrzucenia całej listy i crashu widoku Dashboard.
     const projects: Project[] = [];
     for (const entry of result) {
       const parsed = projectSchema.safeParse(entry);
@@ -233,6 +228,12 @@ export async function loadProjects(): Promise<Project[]> {
       b.metadata.updatedAt.localeCompare(a.metadata.updatedAt)
     );
   });
+}
+
+// Fix #5: przywrócono loadProjectsFromIDB() jako alias do loadProjects()
+// dla kompatybilności wstecznej z istniejącymi call-site.
+export async function loadProjectsFromIDB(): Promise<Project[]> {
+  return loadProjects();
 }
 
 export async function saveProject(project: Project): Promise<void> {
@@ -263,6 +264,11 @@ export function downloadProjectJSON(project: Project): void {
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
   }
+}
+
+// Fix #1: przywrócono API kompatybilne wstecznie — eksport inicjujący pobranie pliku.
+export function exportProjectToJSON(project: Project): void {
+  downloadProjectJSON(project);
 }
 
 export async function importProjectJSON(file: File): Promise<Project> {

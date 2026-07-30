@@ -97,6 +97,30 @@ function canvasToDataURL(canvas: HTMLCanvasElement): Promise<string> {
   });
 }
 
+function downloadCanvasAsPng(canvas: HTMLCanvasElement, filename: string): void {
+  const link = document.createElement('a');
+  link.download = filename;
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+}
+
+function downloadBomAsCsv(bomEntries: BomEntry[], filename: string): void {
+  const header = 'ID,Kolor,HEX,R,G,B,Ilość\n';
+  const rows = bomEntries
+    .map((e) => `${e.colorId},${e.name},${e.hex},${e.rgb.r},${e.rgb.g},${e.rgb.b},${e.count}`)
+    .join('\n');
+  const csvContent = header + rows;
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 export default function ExportPanel({ project }: ExportPanelProps) {
   const [exportError, setExportError] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
@@ -211,8 +235,6 @@ export default function ExportPanel({ project }: ExportPanelProps) {
 
       for (const [rowNum, cells] of rowInstructions) {
         const rowText = `Rząd ${rowNum + 1}: ${cells.map((c) => c.colorName).join(', ')}`;
-        // Fix #4: splitTextToSize użyte realnie w runtime do łamania długich
-        // wierszy PDF; długie linie są zawijane do szerokości strony.
         const wrappedLines = pdf.splitTextToSize(rowText, maxTextWidth) as string[];
 
         for (const line of wrappedLines) {
@@ -245,6 +267,35 @@ export default function ExportPanel({ project }: ExportPanelProps) {
       );
     }
   }, [project]);
+
+  const handleExportPng = useCallback(async () => {
+    setExportError(null);
+    setIsExporting(true);
+    try {
+      const engine = new ProjectionEngine(project);
+      const { textureCanvas } = engine.project2D();
+      downloadCanvasAsPng(textureCanvas, `${project.name}-rzut2d.png`);
+    } catch (error) {
+      console.error('[ExportPanel] Błąd eksportu PNG:', error);
+      setExportError(
+        `Nie udało się wyeksportować PNG: ${error instanceof Error ? error.message : 'nieznany błąd'}`
+      );
+    } finally {
+      setIsExporting(false);
+    }
+  }, [project]);
+
+  const handleExportCsv = useCallback(() => {
+    setExportError(null);
+    try {
+      downloadBomAsCsv(bomEntries, `${project.name}-bom.csv`);
+    } catch (error) {
+      console.error('[ExportPanel] Błąd eksportu CSV:', error);
+      setExportError(
+        `Nie udało się wyeksportować CSV: ${error instanceof Error ? error.message : 'nieznany błąd'}`
+      );
+    }
+  }, [bomEntries, project]);
 
   return (
     <section aria-label="Eksport projektu" className="export-panel">
@@ -284,6 +335,20 @@ export default function ExportPanel({ project }: ExportPanelProps) {
         >
           Eksportuj JSON (projekt)
         </button>
+        <button
+          type="button"
+          disabled={isExporting}
+          onClick={handleExportPng}
+        >
+          Eksportuj PNG (rzut 2D)
+        </button>
+        <button
+          type="button"
+          disabled={isExporting}
+          onClick={handleExportCsv}
+        >
+          Eksportuj CSV (BOM)
+        </button>
       </div>
 
       <section aria-label="Lista materiałów" className="export-panel__bom">
@@ -297,9 +362,6 @@ export default function ExportPanel({ project }: ExportPanelProps) {
                 <span
                   className="export-panel__swatch"
                   aria-hidden="true"
-                  // Fix #2: realna reguła CSS została dodana inline jako fallback runtime,
-                  // więc swatch działa nawet gdy stylesheet nie definiuje var(--swatch-color).
-                  // Fix #3: backgroundColor zapewnia bezpośredni fallback niezależny od CSS var.
                   style={
                     {
                       '--swatch-color': entry.hex,

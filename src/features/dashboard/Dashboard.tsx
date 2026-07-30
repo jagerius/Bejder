@@ -141,8 +141,6 @@ export default function Dashboard() {
       }
     };
 
-    // Fix #2: reader.onerror i reader.onabort rozdzielone jawnie.
-    // Anulowanie wyboru/odczytu nie powinno być raportowane jako błąd.
     reader.onerror = () => {
       setNotice(null);
       setImportError('Nie udało się odczytać pliku.');

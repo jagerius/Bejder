@@ -78,16 +78,77 @@ export function buildAdjacencyIndex(segments: Segment[]): Map<string, Set<string
 }
 
 /**
- * Fix #1: floodFill — eksportowany z aktualną sygnaturą.
- * Wypełnia wszystkie komórki w tym samym kolorze co startCellId.
+ * Fix #2: przywrócono kompatybilność starej sygnatury floodFill przez overload.
  */
+export function floodFill(
+  cells: BeadCell[],
+  startCellId: string
+): string[];
 export function floodFill(
   segments: Segment[],
   patternMap: PatternMap,
   startCellId: string,
   targetColorId: string,
   adjacency?: Map<string, Set<string>>
-): PatternMap {
+): PatternMap;
+export function floodFill(
+  arg1: BeadCell[] | Segment[],
+  arg2: string | PatternMap,
+  arg3?: string,
+  arg4?: string,
+  arg5?: Map<string, Set<string>>
+): string[] | PatternMap {
+  if (typeof arg2 === 'string' && arg3 === undefined) {
+    const cells = arg1 as BeadCell[];
+    const startCellId = arg2;
+    const cellMap = new Map(cells.map((cell) => [cell.id, cell]));
+    const startCell = cellMap.get(startCellId);
+    if (!startCell) return [];
+
+    const visited = new Set<string>();
+    const result: string[] = [];
+    const queue: string[] = [startCellId];
+
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+      if (visited.has(currentId)) continue;
+      visited.add(currentId);
+
+      const currentCell = cellMap.get(currentId);
+      if (!currentCell) continue;
+
+      result.push(currentId);
+
+      for (const candidate of cells) {
+        if (visited.has(candidate.id) || candidate.segmentId !== currentCell.segmentId) continue;
+
+        const isSameRowNeighbor =
+          candidate.row === currentCell.row &&
+          Math.abs(candidate.col - currentCell.col) === 1;
+
+        const isBelowNeighbor =
+          candidate.row === currentCell.row + 1 &&
+          (candidate.col === currentCell.col || candidate.col === currentCell.col + 1);
+
+        const isAboveNeighbor =
+          candidate.row === currentCell.row - 1 &&
+          (candidate.col === currentCell.col - 1 || candidate.col === currentCell.col);
+
+        if (isSameRowNeighbor || isBelowNeighbor || isAboveNeighbor) {
+          queue.push(candidate.id);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  const segments = arg1 as Segment[];
+  const patternMap = arg2 as PatternMap;
+  const startCellId = arg3 as string;
+  const targetColorId = arg4 as string;
+  const adjacency = arg5;
+
   const adj = adjacency ?? buildAdjacencyIndex(segments);
   const startColor = patternMap[startCellId] ?? null;
   const result: PatternMap = { ...patternMap };
